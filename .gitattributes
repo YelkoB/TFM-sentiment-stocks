@@ -1,0 +1,5 @@
+# Count R Markdown files as R in GitHub's language statistics
+*.Rmd linguist-language=R
+
+# Committed CSVs are data, not source — keep them out of the language stats
+*.csv linguist-detectable=false

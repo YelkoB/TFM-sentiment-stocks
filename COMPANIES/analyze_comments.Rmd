@@ -1,0 +1,1017 @@
+---
+title: "Multi-company analysis: comment-sentiment tables"
+author: "Yelko Bejarano"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{float}
+  - \usepackage{array}
+  - \usepackage{colortbl}
+  - \usepackage{xcolor}
+  - \usepackage{threeparttable}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12,
+  fig.height = 8
+)
+
+# Detect output format to adapt tables
+is_latex <- knitr::is_latex_output()
+```
+
+# =============================================================================
+# PART A: CONFIGURATION
+# =============================================================================
+
+```{r config_principal}
+TICKERS <- c("AAPL", "AMD", "AMZN", "DIS", "GOOGL", "META", "MSFT", "NFLX", "NVDA", "TSLA")
+
+ALGO_PRINCIPAL <- "roberta_stocks"
+
+ALGORITMOS_TODOS <- c(
+  "finbert", "roberta_social", "roberta_stocks",
+  "distilroberta_fin", "bert_sentiment"
+)
+
+MA_DIAS <- 7
+
+DIR_BASE <- getwd()
+DIR_OUTPUT <- file.path(DIR_BASE, "RESULTADOS_v4")
+if (!dir.exists(DIR_OUTPUT)) dir.create(DIR_OUTPUT, recursive = TRUE)
+
+ALGO_LABELS <- c(
+  "finbert"           = "FinBERT",
+  "roberta_social"    = "RoBERTa-Soc",
+  "roberta_stocks"    = "RoBERTa-Stk",
+  "distilroberta_fin" = "DistilRoB",
+  "bert_sentiment"    = "BERT"
+)
+
+cat("=======================================================================\n")
+cat("                    CONFIGURATION\n")
+cat(sprintf("  Companies:       %s\n", paste(TICKERS, collapse = ", ")))
+cat(sprintf("  Primary algo:    %s\n", ALGO_PRINCIPAL))
+cat(sprintf("  MA control:      MA(%d)\n", MA_DIAS))
+cat("=======================================================================\n")
+```
+
+```{r librerias}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(lubridate)
+  library(readr)
+  library(lmtest)
+  library(sandwich)
+  library(car)
+  library(tseries)
+  library(quantmod)
+  library(knitr)
+  library(kableExtra)
+  library(zoo)
+})
+cat("Libraries loaded\n")
+```
+
+# =============================================================================
+# PART B: HELPER FUNCTIONS
+# =============================================================================
+
+```{r funciones_estimacion}
+# Estimate OLS with Newey-West HAC standard errors (with diagnostics)
+estimar_modelo <- function(formula_str, data, nombre_modelo, ticker, algoritmo) {
+  formula_str <- gsub("\\s+", " ", formula_str)
+  formula_modelo <- as.formula(formula_str)
+  vars_en_formula <- all.vars(formula_modelo)
+
+  vars_faltantes <- setdiff(vars_en_formula, names(data))
+  if (length(vars_faltantes) > 0) {
+    cat("      [!]", nombre_modelo, "-> MISSING VARS:",
+        paste(vars_faltantes, collapse = ", "), "\n")
+    return(NULL)
+  }
+
+  data_est <- data %>% select(all_of(vars_en_formula)) %>% na.omit()
+  if (nrow(data_est) < 30) {
+    cat("      [!]", nombre_modelo, "-> only", nrow(data_est), "obs (min 30)\n")
+    return(NULL)
+  }
+
+  modelo_ols <- lm(formula_modelo, data = data_est)
+  robust_se <- NeweyWest(modelo_ols, prewhite = FALSE, adjust = TRUE)
+  coef_robust <- coeftest(modelo_ols, vcov = robust_se)
+
+  n_obs <- nrow(data_est)
+  k_params <- length(coef(modelo_ols))
+  r2_adj <- summary(modelo_ols)$adj.r.squared
+  aic_val <- AIC(modelo_ols)
+  aicc_val <- aic_val + (2 * k_params^2 + 2 * k_params) / (n_obs - k_params - 1)
+  bic_val <- BIC(modelo_ols)
+
+  resultados <- data.frame()
+  for (i in 1:nrow(coef_robust)) {
+    var_name <- rownames(coef_robust)[i]
+    p_val <- coef_robust[i, "Pr(>|t|)"]
+    sig_symbol <- ifelse(p_val < 0.001, "***",
+                  ifelse(p_val < 0.01, "**",
+                  ifelse(p_val < 0.05, "*",
+                  ifelse(p_val < 0.1, "†", ""))))
+
+    resultados <- rbind(resultados, data.frame(
+      Modelo = nombre_modelo,
+      Empresa = ticker,
+      Algoritmo = algoritmo,
+      N = n_obs,
+      Variable = var_name,
+      Coef = coef_robust[i, "Estimate"],
+      Std_Error = coef_robust[i, "Std. Error"],
+      t_value = coef_robust[i, "t value"],
+      P_value = p_val,
+      Signif = sig_symbol,
+      AICc = aicc_val,
+      BIC = bic_val,
+      R2_adj = r2_adj,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  # Variables dropped by perfect collinearity (NA in coef(lm)) are recorded with
+  # Coef = NA so the table shows "—" instead of an empty cell.
+  coefs_lm <- coef(modelo_ols)
+  vars_descartadas <- names(coefs_lm)[is.na(coefs_lm)]
+  for (var_name in vars_descartadas) {
+    resultados <- rbind(resultados, data.frame(
+      Modelo     = nombre_modelo,
+      Empresa    = ticker,
+      Algoritmo  = algoritmo,
+      N          = n_obs,
+      Variable   = var_name,
+      Coef       = NA_real_,
+      Std_Error  = NA_real_,
+      t_value    = NA_real_,
+      P_value    = NA_real_,
+      Signif     = "",
+      AICc       = aicc_val,
+      BIC        = bic_val,
+      R2_adj     = r2_adj,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  return(resultados)
+}
+
+# Format a table cell = coefficient + significance stars
+fmt_celda <- function(coef, pval, digits = 4) {
+  if (is.na(coef)) return("—")  # dropped by collinearity
+  if (is.na(pval)) return(formatC(coef, format = "f", digits = digits))
+  dag <- if (knitr::is_latex_output()) "$\\dagger$" else "†"
+  stars <- ifelse(pval < 0.001, "***",
+           ifelse(pval < 0.01, "**",
+           ifelse(pval < 0.05, "*",
+           ifelse(pval < 0.1, dag, ""))))
+  coef_str <- formatC(coef, format = "f", digits = digits)
+  paste0(coef_str, stars)
+}
+
+# Display name for a variable (without the algorithm prefix)
+nombre_var_display <- function(var_raw, algoritmo = NULL) {
+  v <- var_raw
+  if (!is.null(algoritmo)) v <- gsub(paste0("^", algoritmo, "_"), "", v)
+
+  # LaTeX: real math superscripts ($\Delta S^{+}$) in the PDF.
+  # HTML:  Unicode (Δ, ⁺/⁻) for the browser.
+  if (knitr::is_latex_output()) {
+    lookup <- c(
+      "(Intercept)"                = "Intercept",
+      "DJI_RET"                    = "DJI RET",
+      "DJI_VOL"                    = "DJI VOL",
+      "DJI_VOLUME"                 = "DJI VOLUME",
+      "NWK"                        = "NWK",
+      "ln_comments_fuera_mercado"  = "ln(comments)",
+      "wt_shift_fuera_mercado"     = "$\\Delta S$ ON",
+      "wt_shift_afterhours"        = "$\\Delta S$ AH",
+      "wt_shift_premarket"         = "$\\Delta S$ PM",
+      "wt_shift_pos_afterhours"    = "$\\Delta S^{+}$ AH",
+      "wt_shift_neg_afterhours"    = "$\\Delta S^{-}$ AH",
+      "wt_shift_pos_premarket"     = "$\\Delta S^{+}$ PM",
+      "wt_shift_neg_premarket"     = "$\\Delta S^{-}$ PM"
+    )
+  } else {
+    lookup <- c(
+      "(Intercept)"                = "Intercept",
+      "DJI_RET"                    = "DJI RET",
+      "DJI_VOL"                    = "DJI VOL",
+      "DJI_VOLUME"                 = "DJI VOLUME",
+      "NWK"                        = "NWK",
+      "ln_comments_fuera_mercado"  = "ln(comments)",
+      "wt_shift_fuera_mercado"     = "ΔS ON",
+      "wt_shift_afterhours"        = "ΔS AH",
+      "wt_shift_premarket"         = "ΔS PM",
+      "wt_shift_pos_afterhours"    = "ΔS⁺ AH",
+      "wt_shift_neg_afterhours"    = "ΔS⁻ AH",
+      "wt_shift_pos_premarket"     = "ΔS⁺ PM",
+      "wt_shift_neg_premarket"     = "ΔS⁻ PM"
+    )
+  }
+
+  if (v %in% names(lookup)) return(lookup[v])
+  if (grepl("^VOL_MA", v)) return(paste0("VOL MA(", MA_DIAS, ")"))
+  if (grepl("^VOLUME_MA", v)) return(paste0("VOL. MA(", MA_DIAS, ")"))
+  return(v)
+}
+
+# Guarantee the expected columns exist after pivot_wider
+asegurar_columnas <- function(df) {
+  for (p in c("afterhours", "premarket", "market")) {
+    for (prefix in c("sentiment_wt_", "n_comments_", "wt_sent_pos_", "wt_sent_neg_")) {
+      col <- paste0(prefix, p)
+      if (!col %in% names(df)) df[[col]] <- NA_real_
+    }
+  }
+  return(df)
+}
+
+cat("Helper functions defined\n")
+```
+
+# =============================================================================
+# PART C: MAIN LOOP - PER-COMPANY PROCESSING
+# =============================================================================
+
+```{r bucle_empresas, results='hide'}
+RESULTADOS_ALL <- data.frame()
+dji_df_global <- NULL
+
+cat("=======================================================================\n")
+cat("              PER-COMPANY PROCESSING\n")
+cat("=======================================================================\n\n")
+
+for (TICKER in TICKERS) {
+
+  cat("\n=====================================================\n")
+  cat(sprintf("  COMPANY: %-38s\n", TICKER))
+  cat("=====================================================\n")
+
+  # C.1 Load comments
+  comments_file <- file.path(DIR_BASE, TICKER,
+                             paste0("comments_", tolower(TICKER), "_all_sentiments.csv"))
+
+  if (!file.exists(comments_file)) {
+    cat("  FILE NOT FOUND:", comments_file, "\n")
+    next
+  }
+
+  comments_raw <- read_csv(comments_file, show_col_types = FALSE)
+  cat("  CSV loaded:", nrow(comments_raw), "comments\n")
+
+  # C.2 Time zone and intraday periods
+  comments_raw <- comments_raw %>%
+    mutate(
+      datetime_spain = force_tz(comment_datetime_full, tzone = "Europe/Madrid"),
+      comment_datetime_est = with_tz(datetime_spain, tzone = "America/New_York"),
+      comment_hour_decimal = hour(comment_datetime_est) + minute(comment_datetime_est) / 60
+    )
+
+  comments <- comments_raw %>%
+    mutate(
+      periodo = case_when(
+        comment_hour_decimal >= 16 ~ "afterhours",
+        comment_hour_decimal < 9.5 ~ "premarket",
+        TRUE ~ "market"
+      ),
+      trading_day = trading_date
+    ) %>%
+    distinct(body, score, trading_day, .keep_all = TRUE)
+
+  cat("  Unique comments:", nrow(comments), "\n")
+
+  # Period distribution diagnostic
+  dist_periodo <- comments %>% count(periodo) %>% mutate(pct = round(n / sum(n) * 100, 1))
+  for (r in 1:nrow(dist_periodo)) {
+    cat(sprintf("      %s: %d (%.1f%%)\n", dist_periodo$periodo[r],
+                dist_periodo$n[r], dist_periodo$pct[r]))
+  }
+
+  # C.3 Market data
+  fecha_min <- min(comments$trading_day)
+  fecha_max <- max(comments$trading_day)
+
+  precio_accion <- tryCatch(
+    getSymbols(TICKER, from = fecha_min - 30, to = fecha_max + 1, auto.assign = FALSE),
+    error = function(e) { cat("  Error downloading", TICKER, "\n"); return(NULL) }
+  )
+  if (is.null(precio_accion)) next
+
+  precio_df <- data.frame(
+    date = index(precio_accion),
+    open = as.numeric(Op(precio_accion)),
+    high = as.numeric(Hi(precio_accion)),
+    low = as.numeric(Lo(precio_accion)),
+    close = as.numeric(Cl(precio_accion)),
+    volume = as.numeric(Vo(precio_accion))
+  ) %>%
+    mutate(
+      RET = log(close / lag(close)) * 100,
+      VOL    = (log(high) - log(low))^2 / (4 * log(2)) * 10000,
+      VOLUME = log(volume)
+    )
+
+  ma_var_vol <- paste0("VOL_MA", MA_DIAS)
+  ma_var_volume <- paste0("VOLUME_MA", MA_DIAS)
+
+  precio_df <- precio_df %>%
+    mutate(
+      !!ma_var_vol := lag(zoo::rollmean(VOL, k = MA_DIAS, fill = NA, align = "right")),
+      !!ma_var_volume := lag(zoo::rollmean(VOLUME, k = MA_DIAS, fill = NA, align = "right"))
+    )
+
+  cat("  Prices:", nrow(precio_df), "obs\n")
+
+  # DJI (downloaded once)
+  if (is.null(dji_df_global)) {
+    DJI_data <- getSymbols("^DJI", from = as.Date("2020-01-01"),
+                            to = Sys.Date(), auto.assign = FALSE)
+    dji_df_global <- data.frame(
+      date = index(DJI_data),
+      DJI_close = as.numeric(Cl(DJI_data)),
+      DJI_high = as.numeric(Hi(DJI_data)),
+      DJI_low = as.numeric(Lo(DJI_data)),
+      DJI_volume_raw = as.numeric(Vo(DJI_data))
+    ) %>%
+      mutate(
+        DJI_RET = log(DJI_close / lag(DJI_close)) * 100,
+        DJI_VOL    = (log(DJI_high) - log(DJI_low))^2 / (4 * log(2)) * 10000,
+        DJI_VOLUME = log(DJI_volume_raw)
+      )
+    cat("  DJI loaded (global)\n")
+  }
+
+  # C.4 Loop over algorithms
+  columnas_csv <- names(comments)
+  algoritmos_disponibles <- gsub("_score$", "", columnas_csv[grepl("_score$", columnas_csv)])
+  algoritmos_validos <- intersect(ALGORITMOS_TODOS, algoritmos_disponibles)
+  cat("  Algorithms:", paste(algoritmos_validos, collapse = ", "), "\n")
+
+  for (ALGORITMO in algoritmos_validos) {
+
+    cat("    -> ", ALGORITMO, "...")
+
+    score_var <- paste0(ALGORITMO, "_score")
+    conf_var <- paste0(ALGORITMO, "_confidence")
+    label_var <- paste0(ALGORITMO, "_label")
+
+    if (!score_var %in% names(comments)) { cat(" SKIPPED\n"); next }
+
+    # Confidence-weighted sentiment per period
+    agg_wt_periodo <- comments %>%
+      group_by(trading_day, periodo) %>%
+      summarise(
+        sentiment_wt = weighted.mean(.data[[score_var]], w = .data[[conf_var]], na.rm = TRUE),
+        n_comments = n(),
+        .groups = 'drop'
+      ) %>%
+      pivot_wider(
+        id_cols = trading_day,
+        names_from = periodo,
+        values_from = c(sentiment_wt, n_comments),
+        names_glue = "{.value}_{periodo}"
+      )
+
+    # Positive/negative components.
+    # Denominator: sum(conf) over all comments in the period (not n_total).
+    # wt_sent_neg is negative: it is the negative contribution to the index.
+    agg_pos_neg_periodo <- comments %>%
+      group_by(trading_day, periodo) %>%
+      summarise(
+        sum_conf_total = sum(.data[[conf_var]], na.rm = TRUE),
+        sum_conf_pos   = sum(.data[[conf_var]][.data[[label_var]] == "positive"], na.rm = TRUE),
+        sum_conf_neg   = sum(.data[[conf_var]][.data[[label_var]] == "negative"], na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      mutate(
+        wt_sent_pos = if_else(sum_conf_total > 0, sum_conf_pos / sum_conf_total, 0),
+        wt_sent_neg = if_else(sum_conf_total > 0, -sum_conf_neg / sum_conf_total, 0)
+      ) %>%
+      select(trading_day, periodo, wt_sent_pos, wt_sent_neg) %>%
+      pivot_wider(
+        id_cols = trading_day,
+        names_from = periodo,
+        values_from = c(wt_sent_pos, wt_sent_neg),
+        names_glue = "{.value}_{periodo}"
+      )
+
+    # Join and guarantee columns
+    daily_sentiment <- agg_wt_periodo %>%
+      left_join(agg_pos_neg_periodo, by = "trading_day") %>%
+      arrange(trading_day)
+
+    daily_sentiment <- asegurar_columnas(daily_sentiment)
+
+    # Al-Nasseri et al. (2021, note 16): "filling those missing values with zeros".
+    # Impute sentiment LEVELS to 0 BEFORE computing shifts.
+    # Rationale: no comments in a period = no new information = neutral.
+    level_cols <- c("sentiment_wt_afterhours", "sentiment_wt_premarket",
+                     "wt_sent_pos_afterhours", "wt_sent_neg_afterhours",
+                     "wt_sent_pos_premarket", "wt_sent_neg_premarket")
+
+    na_levels <- sapply(level_cols, function(x) sum(is.na(daily_sentiment[[x]])))
+    for (lc in level_cols) daily_sentiment[[lc]] <- replace_na(daily_sentiment[[lc]], 0)
+
+    # Compute shifts on the imputed levels (no NA propagation)
+    daily_sentiment <- daily_sentiment %>%
+      mutate(
+        wt_shift_afterhours = sentiment_wt_afterhours - lag(sentiment_wt_afterhours),
+        wt_shift_premarket = sentiment_wt_premarket - lag(sentiment_wt_premarket),
+        wt_shift_fuera_mercado = wt_shift_afterhours + wt_shift_premarket,
+        wt_shift_pos_afterhours = wt_sent_pos_afterhours - lag(wt_sent_pos_afterhours),
+        wt_shift_pos_premarket = wt_sent_pos_premarket - lag(wt_sent_pos_premarket),
+        wt_shift_neg_afterhours = wt_sent_neg_afterhours - lag(wt_sent_neg_afterhours),
+        wt_shift_neg_premarket = wt_sent_neg_premarket - lag(wt_sent_neg_premarket),
+        ln_comments_fuera_mercado = log(replace_na(n_comments_afterhours, 0) +
+                                         replace_na(n_comments_premarket, 0) + 1)
+      )
+
+    if (sum(na_levels) > 0) {
+      cat(" [levels NA→0: AH=", na_levels["sentiment_wt_afterhours"],
+          " PM=", na_levels["sentiment_wt_premarket"], "]")
+    }
+
+    # Join with market data
+    cols_precio <- c("date", "RET", "VOL", "VOLUME", ma_var_vol, ma_var_volume)
+
+    data_model <- daily_sentiment %>%
+      inner_join(precio_df %>% select(all_of(cols_precio)),
+                 by = c("trading_day" = "date")) %>%
+      inner_join(dji_df_global %>% select(date, DJI_RET, DJI_VOL, DJI_VOLUME),
+                 by = c("trading_day" = "date")) %>%
+      arrange(trading_day) %>%
+      mutate(
+        NWK = if_else(row_number() == 1 | (trading_day - lag(trading_day)) > 1, 1, 0)
+      ) %>%
+      filter(!is.na(RET), !is.na(DJI_RET))
+
+    # Add the algorithm prefix
+    vars_a_renombrar <- c(
+      "wt_shift_afterhours", "wt_shift_premarket", "wt_shift_fuera_mercado",
+      "wt_shift_pos_afterhours", "wt_shift_pos_premarket",
+      "wt_shift_neg_afterhours", "wt_shift_neg_premarket"
+    )
+    for (v in vars_a_renombrar) {
+      if (v %in% names(data_model)) {
+        names(data_model)[names(data_model) == v] <- paste0(ALGORITMO, "_", v)
+      }
+    }
+
+    # Define the 9 models (M1/M2/M3 x RET/VOL/VOLUME)
+    make_var <- function(s) paste0(ALGORITMO, "_wt_shift_", s)
+    make_pos <- function(s) paste0(ALGORITMO, "_wt_shift_pos_", s)
+    make_neg <- function(s) paste0(ALGORITMO, "_wt_shift_neg_", s)
+
+    ctrl_RET <- "DJI_RET + NWK + ln_comments_fuera_mercado"
+    ctrl_VOL <- paste0("DJI_VOL + NWK + ln_comments_fuera_mercado + ", ma_var_vol)
+    ctrl_VOLUME <- paste0("DJI_VOLUME + NWK + ln_comments_fuera_mercado + ", ma_var_volume)
+
+    MODELOS <- list(
+      M1_RET = paste0("RET ~ ", ctrl_RET, " + ", make_var("fuera_mercado")),
+      M1_VOL = paste0("VOL ~ ", ctrl_VOL, " + ", make_var("fuera_mercado")),
+      M1_VOLUME = paste0("VOLUME ~ ", ctrl_VOLUME, " + ", make_var("fuera_mercado")),
+      M2_RET = paste0("RET ~ ", ctrl_RET, " + ",
+                       make_var("afterhours"), " + ", make_var("premarket")),
+      M2_VOL = paste0("VOL ~ ", ctrl_VOL, " + ",
+                       make_var("afterhours"), " + ", make_var("premarket")),
+      M2_VOLUME = paste0("VOLUME ~ ", ctrl_VOLUME, " + ",
+                          make_var("afterhours"), " + ", make_var("premarket")),
+      M3_RET = paste0("RET ~ ", ctrl_RET, " + ",
+                       make_pos("afterhours"), " + ", make_neg("afterhours"), " + ",
+                       make_pos("premarket"), " + ", make_neg("premarket")),
+      M3_VOL = paste0("VOL ~ ", ctrl_VOL, " + ",
+                       make_pos("afterhours"), " + ", make_neg("afterhours"), " + ",
+                       make_pos("premarket"), " + ", make_neg("premarket")),
+      M3_VOLUME = paste0("VOLUME ~ ", ctrl_VOLUME, " + ",
+                          make_pos("afterhours"), " + ", make_neg("afterhours"), " + ",
+                          make_pos("premarket"), " + ", make_neg("premarket"))
+    )
+
+    n_estimados <- 0
+    for (nombre_modelo in names(MODELOS)) {
+      res <- estimar_modelo(MODELOS[[nombre_modelo]], data_model,
+                            nombre_modelo, TICKER, ALGORITMO)
+      if (!is.null(res)) {
+        RESULTADOS_ALL <- rbind(RESULTADOS_ALL, res)
+        n_estimados <- n_estimados + 1
+      }
+    }
+    cat(" ", n_estimados, "models\n")
+  }
+
+  # Save per-company RData
+  resultados_empresa <- RESULTADOS_ALL %>% filter(Empresa == TICKER)
+  rdata_file <- file.path(DIR_OUTPUT, paste0("resultados_", TICKER, ".RData"))
+  save(resultados_empresa, file = rdata_file)
+  cat("  RData:", basename(rdata_file), "\n")
+}
+
+save(RESULTADOS_ALL, file = file.path(DIR_OUTPUT, "RESULTADOS_ALL_v4.RData"))
+cat("\nGlobal RData:", nrow(RESULTADOS_ALL), "rows\n")
+cat("  Companies:", paste(unique(RESULTADOS_ALL$Empresa), collapse = ", "), "\n")
+```
+
+```{r diagnostico_N, results='asis'}
+# Diagnostic: N per company and temporal continuity
+cat("\n===================================================================\n")
+cat("               DIAGNOSTIC: OBSERVATIONS PER COMPANY\n")
+cat("===================================================================\n\n")
+
+# N per company and model (first algorithm as reference)
+algo_ref <- ALGORITMOS_TODOS[1]
+
+for (emp in unique(RESULTADOS_ALL$Empresa)) {
+  sub <- RESULTADOS_ALL %>% filter(Empresa == emp, Algoritmo == algo_ref)
+  modelos_emp <- unique(sub$Modelo)
+  n_ref <- sub %>% filter(Modelo == modelos_emp[1]) %>% slice(1) %>% pull(N)
+
+  cat(sprintf("  %s: N = %d", emp, n_ref))
+
+  if (n_ref < 100) {
+    cat(" [!] SMALL SAMPLE")
+  }
+  cat("\n")
+}
+
+# Continuity detail for companies with N < 200
+cat("\n--- Temporal continuity detail ---\n\n")
+
+empresas_check <- unique(RESULTADOS_ALL$Empresa)
+
+for (emp in empresas_check) {
+  sub <- RESULTADOS_ALL %>% filter(Empresa == emp, Algoritmo == algo_ref,
+                                     Modelo == "M1_RET")
+  n_emp <- if (nrow(sub) > 0) sub$N[1] else NA
+
+  if (!is.na(n_emp) && n_emp < 200) {
+    # Rebuild the dataset for this company
+    comments_file <- file.path(DIR_BASE, emp,
+                               paste0("comments_", tolower(emp), "_all_sentiments.csv"))
+    if (file.exists(comments_file)) {
+      tmp_raw <- read_csv(comments_file, show_col_types = FALSE)
+
+      # Count trading days with comments
+      dias_con_comments <- length(unique(tmp_raw$trading_date))
+      rango <- range(tmp_raw$trading_date)
+
+      cat(sprintf("  %s: N = %d | Days with comments: %d | Range: %s to %s\n",
+                  emp, n_emp, dias_con_comments, rango[1], rango[2]))
+
+      # Temporal gaps
+      dias_ordenados <- sort(unique(tmp_raw$trading_date))
+      diffs <- as.numeric(diff(dias_ordenados))
+      gaps_largos <- sum(diffs > 5)  # gaps longer than 5 days (1 week)
+      max_gap <- max(diffs)
+      median_gap <- median(diffs)
+
+      cat(sprintf("    Median between obs: %.0f days | Max gap: %.0f days | Gaps >5 days: %d\n",
+                  median_gap, max_gap, gaps_largos))
+
+      if (max_gap > 30) {
+        cat("    [!] Gap >30 days detected - series NOT continuous\n")
+      } else if (median_gap <= 2) {
+        cat("    Observations reasonably consecutive\n")
+      }
+    }
+  }
+}
+
+cat("\n")
+```
+
+# =============================================================================
+# PART D: FIRST TABLES - PROGRESSIVE DECOMPOSITION (one per company)
+# =============================================================================
+
+## Structure
+
+One table per company. Variable column + 3 columns (M1, M2, M3).
+`add_header_above()` groups M1/M2/M3 on top.
+`pack_rows()` on the side groups *Sentiment*, *Controls*, *Fit* within each DV.
+
+```{r cargar_rdata}
+# Uncomment to regenerate tables without re-estimating:
+# load(file.path(DIR_OUTPUT, "RESULTADOS_ALL_v4.RData"))
+
+if (!exists("RESULTADOS_ALL") || nrow(RESULTADOS_ALL) == 0) {
+  stop("No results. Run Part C or load the RData.")
+}
+
+empresas_disponibles <- intersect(TICKERS, unique(RESULTADOS_ALL$Empresa))
+cat("Companies with results:", paste(empresas_disponibles, collapse = ", "), "\n")
+
+empresas_sin_datos <- setdiff(TICKERS, empresas_disponibles)
+if (length(empresas_sin_datos) > 0) {
+  cat("Without results:", paste(empresas_sin_datos, collapse = ", "), "\n")
+}
+```
+
+```{r funcion_tabla_descomp}
+# Progressive-decomposition table for ONE company.
+#   Columns:    Variable | M1 | M2 | M3
+#   add_header: "Progressive decomposition" over M1-M3
+#   pack_rows:  "RET - Sentiment", "RET - Controls", "RET - Fit", etc.
+#   Cell:       coefficient + stars
+construir_tabla_descomp <- function(resultados, empresa, algoritmo) {
+
+  res <- resultados %>% filter(Empresa == empresa, Algoritmo == algoritmo)
+  if (nrow(res) == 0) return(NULL)
+
+  ma_vol_v <- paste0("VOL_MA", MA_DIAS)
+  ma_volume_v <- paste0("VOLUME_MA", MA_DIAS)
+
+  # Internal helpers
+  get_celda <- function(modelo, var_raw) {
+    var_buscar <- paste0(algoritmo, "_", var_raw)
+    fila <- res %>% filter(Modelo == modelo, Variable == var_buscar)
+    if (nrow(fila) == 0) fila <- res %>% filter(Modelo == modelo, Variable == var_raw)
+    if (nrow(fila) == 0) return("")
+    fmt_celda(fila$Coef, fila$P_value)
+  }
+
+  get_stat <- function(modelo, stat) {
+    sub <- res %>% filter(Modelo == modelo) %>% slice(1)
+    if (nrow(sub) == 0) return("")
+    switch(stat,
+      "AICc"       = formatC(sub$AICc, format = "f", digits = 2),
+      "BIC"        = formatC(sub$BIC, format = "f", digits = 2),
+      "R² adj" = formatC(sub$R2_adj, format = "f", digits = 4)
+    )
+  }
+
+  # Definitions
+  sent_M1 <- c("wt_shift_fuera_mercado")
+  sent_M2 <- c("wt_shift_afterhours", "wt_shift_premarket")
+  sent_M3 <- c("wt_shift_pos_afterhours", "wt_shift_neg_afterhours",
+                "wt_shift_pos_premarket", "wt_shift_neg_premarket")
+  all_sent <- c(sent_M1, sent_M2, sent_M3)
+
+  dvs <- list(
+    list(nombre = "RET",    modelos = c("M1_RET", "M2_RET", "M3_RET"),
+         ctrl = c("(Intercept)", "DJI_RET", "NWK", "ln_comments_fuera_mercado")),
+    list(nombre = "VOL",    modelos = c("M1_VOL", "M2_VOL", "M3_VOL"),
+         ctrl = c("(Intercept)", "DJI_VOL", "NWK", "ln_comments_fuera_mercado", ma_vol_v)),
+    list(nombre = "VOLUME", modelos = c("M1_VOLUME", "M2_VOLUME", "M3_VOLUME"),
+         ctrl = c("(Intercept)", "DJI_VOLUME", "NWK", "ln_comments_fuera_mercado", ma_volume_v))
+  )
+
+  stats <- c("AICc", "BIC", "R² adj")
+
+  # Build rows: Variable | M1 | M2 | M3 (no Group column)
+  filas <- list()
+  pack_vd <- list()     # outer pack_rows: RET / VOL / VOLUME
+  pack_cat <- list()    # inner pack_rows: Sentiment / Controls / Fit
+  row_idx <- 0
+  n_obs <- NA
+
+  for (dv in dvs) {
+    m <- dv$modelos
+    dv_start <- row_idx + 1
+
+    # Sentiment
+    cat_sent_start <- row_idx + 1
+    for (v in all_sent) {
+      v_display <- nombre_var_display(v)
+      c1 <- if (v %in% sent_M1) get_celda(m[1], v) else ""
+      c2 <- if (v %in% sent_M2) get_celda(m[2], v) else ""
+      c3 <- if (v %in% sent_M3) get_celda(m[3], v) else ""
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- c(v_display, c1, c2, c3)
+    }
+    pack_cat[[length(pack_cat) + 1]] <- list(
+      label = "Sentiment", start = cat_sent_start, end = row_idx)
+
+    # Controls
+    cat_ctrl_start <- row_idx + 1
+    for (v in dv$ctrl) {
+      v_display <- nombre_var_display(v)
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- c(v_display, get_celda(m[1], v),
+                            get_celda(m[2], v), get_celda(m[3], v))
+    }
+    pack_cat[[length(pack_cat) + 1]] <- list(
+      label = "Controls", start = cat_ctrl_start, end = row_idx)
+
+    # Fit
+    cat_adj_start <- row_idx + 1
+    for (s in stats) {
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- c(s, get_stat(m[1], s), get_stat(m[2], s), get_stat(m[3], s))
+    }
+    pack_cat[[length(pack_cat) + 1]] <- list(
+      label = "Fit", start = cat_adj_start, end = row_idx)
+
+    # Capture N from the first available model
+    if (is.na(n_obs)) {
+      sub_n <- res %>% filter(Modelo == m[1]) %>% slice(1)
+      if (nrow(sub_n) > 0) n_obs <- sub_n$N
+    }
+
+    pack_vd[[length(pack_vd) + 1]] <- list(
+      label = dv$nombre, start = dv_start, end = row_idx
+    )
+  }
+
+  tabla_df <- do.call(rbind, filas) %>% as.data.frame(stringsAsFactors = FALSE)
+  colnames(tabla_df) <- c("Variable", "M1", "M2", "M3")
+
+  list(tabla = tabla_df, pack_vd = pack_vd, pack_cat = pack_cat, n_obs = n_obs)
+}
+
+cat("Function construir_tabla_descomp defined\n")
+```
+
+```{r tablas_descomp, results='asis'}
+# Generate progressive-decomposition tables.
+# In LaTeX do NOT force column widths: booktabs + align c("l","c","c","c")
+# auto-sizes perfectly. column_spec is only for HTML.
+tabla_num <- 0
+fmt <- if (knitr::is_latex_output()) "latex" else "html"
+es_pdf <- (fmt == "latex")
+
+for (emp in empresas_disponibles) {
+
+  tabla_num <- tabla_num + 1
+  resultado <- construir_tabla_descomp(RESULTADOS_ALL, emp, ALGO_PRINCIPAL)
+
+  if (is.null(resultado)) {
+    cat(paste0("\n\n### Table ", tabla_num, ": ", emp, " - no data\n\n"))
+    next
+  }
+
+  tbl <- kbl(resultado$tabla,
+      format = fmt,
+      caption = paste0("Progressive sentiment decomposition -- ", emp,
+                       " (", ALGO_LABELS[ALGO_PRINCIPAL], ")"),
+      col.names = c("", "M1", "M2", "M3"),
+      align = c("l", "c", "c", "c"),
+      booktabs = TRUE,
+      linesep = "",
+      escape = FALSE)
+
+  if (es_pdf) {
+    tbl <- tbl %>%
+      kable_styling(
+        latex_options = c("HOLD_position"),
+        font_size = 9
+      )
+  } else {
+    tbl <- tbl %>%
+      kable_classic(full_width = FALSE, html_font = "Cambria", font_size = 13) %>%
+      column_spec(1, width = "8em") %>%
+      column_spec(2, width = "10em", border_left = TRUE) %>%
+      column_spec(3, width = "10em", border_left = "1px solid #ddd") %>%
+      column_spec(4, width = "10em", border_left = "1px solid #ddd")
+  }
+
+  for (g in resultado$pack_vd) {
+    tbl <- tbl %>%
+      pack_rows(g$label, g$start, g$end,
+                bold = TRUE, italic = FALSE,
+                hline_before = TRUE, hline_after = FALSE,
+                latex_gap_space = "0.3em")
+  }
+
+  for (g in resultado$pack_cat) {
+    tbl <- tbl %>%
+      pack_rows(g$label, g$start, g$end,
+                bold = FALSE, italic = TRUE,
+                hline_before = FALSE, hline_after = FALSE,
+                indent = FALSE,
+                latex_gap_space = "0.1em")
+  }
+
+  tbl <- tbl %>%
+    footnote(
+      general = paste0("N = ", resultado$n_obs, " trading days.\\ ",
+                       "*** p<0.001  ** p<0.01  * p<0.05  † p<0.1."),
+      footnote_as_chunk = TRUE,
+      threeparttable = es_pdf,
+      escape = FALSE
+    )
+
+  print(tbl)
+}
+
+n_tablas_descomp <- tabla_num
+```
+
+# =============================================================================
+# PART E: SECOND TABLES - ALGORITHM COMPARISON (one per company)
+# =============================================================================
+
+```{r funcion_tabla_algos}
+# Algorithm-comparison table for ONE company.
+# M3 only, sentiment variables only. Controls are estimated but not reported.
+#   Columns:    Variable | FinBERT | RoBERTa-Soc | ... | BERT
+#   add_header: "Sentiment algorithm" over the algorithm columns
+#   pack_rows:  "RET", "VOL", "VOLUME"
+construir_tabla_algos <- function(resultados, empresa, algoritmos, algo_labels) {
+
+  res <- resultados %>% filter(Empresa == empresa)
+  if (nrow(res) == 0) return(NULL)
+
+  algos_ok <- intersect(algoritmos, unique(res$Algoritmo))
+  if (length(algos_ok) == 0) return(NULL)
+
+  vars_sent <- c("wt_shift_pos_afterhours", "wt_shift_neg_afterhours",
+                  "wt_shift_pos_premarket", "wt_shift_neg_premarket")
+
+  dvs <- list(
+    list(nombre = "RET",    modelo = "M3_RET"),
+    list(nombre = "VOL",    modelo = "M3_VOL"),
+    list(nombre = "VOLUME", modelo = "M3_VOLUME")
+  )
+
+  stats <- c("AICc", "BIC", "R² adj")
+
+  filas <- list()
+  pack_grupos <- list()
+  sent_boundary_rows <- c()  # rows where sentiment ends (for a faint rule)
+  row_idx <- 0
+  n_obs <- NA
+
+  for (dv in dvs) {
+    dv_start <- row_idx + 1
+
+    # Sentiment variables
+    for (v in vars_sent) {
+      v_display <- nombre_var_display(v)
+      vals <- c(v_display)
+
+      for (algo in algos_ok) {
+        var_buscar <- paste0(algo, "_", v)
+        fila <- res %>% filter(Modelo == dv$modelo, Algoritmo == algo,
+                               Variable == var_buscar)
+        if (nrow(fila) == 0) {
+          vals <- c(vals, "")
+        } else {
+          vals <- c(vals, fmt_celda(fila$Coef, fila$P_value))
+        }
+      }
+
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- vals
+    }
+
+    # Mark the last sentiment row
+    sent_boundary_rows <- c(sent_boundary_rows, row_idx)
+
+    # Fit statistics
+    for (s in stats) {
+      vals <- c(s)
+      for (algo in algos_ok) {
+        sub <- res %>% filter(Modelo == dv$modelo, Algoritmo == algo) %>% slice(1)
+        if (nrow(sub) == 0) {
+          vals <- c(vals, "")
+        } else {
+          val <- switch(s,
+            "AICc"       = formatC(sub$AICc, format = "f", digits = 2),
+            "BIC"        = formatC(sub$BIC, format = "f", digits = 2),
+            "R² adj" = formatC(sub$R2_adj, format = "f", digits = 4)
+          )
+          vals <- c(vals, val)
+        }
+      }
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- vals
+    }
+
+    # Capture N
+    if (is.na(n_obs)) {
+      sub_n <- res %>% filter(Modelo == dv$modelo) %>% slice(1)
+      if (nrow(sub_n) > 0) n_obs <- sub_n$N
+    }
+
+    pack_grupos[[length(pack_grupos) + 1]] <- list(
+      label = dv$nombre, start = dv_start, end = row_idx
+    )
+  }
+
+  tabla_df <- do.call(rbind, filas) %>% as.data.frame(stringsAsFactors = FALSE)
+  colnames(tabla_df) <- c("Variable", algo_labels[algos_ok])
+
+  list(tabla = tabla_df, pack_grupos = pack_grupos, algos_usados = algos_ok,
+       n_obs = n_obs, sent_boundary_rows = sent_boundary_rows)
+}
+
+cat("Function construir_tabla_algos defined\n")
+```
+
+```{r tablas_algos, results='asis'}
+# Generate algorithm-comparison tables.
+# Same principle: in LaTeX, zero column_spec; perfect auto-sizing.
+for (emp in empresas_disponibles) {
+
+  tabla_num <- tabla_num + 1
+  resultado <- construir_tabla_algos(RESULTADOS_ALL, emp, ALGORITMOS_TODOS, ALGO_LABELS)
+
+  if (is.null(resultado)) {
+    cat(paste0("\n\n### Table ", tabla_num, ": ", emp, " - no data\n\n"))
+    next
+  }
+
+  n_algos <- length(resultado$algos_usados)
+
+  tbl <- kbl(resultado$tabla,
+      format = fmt,
+      caption = paste0("Algorithm comparison -- ", emp,
+                       " (Model M3: ΔS± AH/PM)"),
+      col.names = c("", colnames(resultado$tabla)[-1]),
+      align = c("l", rep("c", n_algos)),
+      booktabs = TRUE,
+      linesep = "",
+      escape = FALSE)
+
+  if (es_pdf) {
+    tbl <- tbl %>%
+      kable_styling(
+        latex_options = c("HOLD_position", "scale_down"),
+        font_size = 8
+      )
+  } else {
+    tbl <- tbl %>%
+      kable_classic(full_width = FALSE, html_font = "Cambria", font_size = 13) %>%
+      column_spec(1, width = "7em") %>%
+      column_spec(2, border_left = TRUE)
+    if (n_algos > 1) {
+      for (col_i in 3:(n_algos + 1)) {
+        tbl <- tbl %>% column_spec(col_i, border_left = "1px solid #ddd")
+      }
+    }
+    for (br in resultado$sent_boundary_rows) {
+      tbl <- tbl %>% row_spec(br, extra_css = "border-bottom: 1px solid #ddd;")
+    }
+  }
+
+  tbl <- tbl %>%
+    add_header_above(c(" " = 1, "Sentiment algorithm" = n_algos),
+                     bold = TRUE, line = TRUE)
+
+  for (g in resultado$pack_grupos) {
+    tbl <- tbl %>%
+      pack_rows(g$label, g$start, g$end,
+                bold = TRUE, italic = FALSE,
+                hline_before = TRUE, hline_after = FALSE,
+                latex_gap_space = "0.3em")
+  }
+
+  tbl <- tbl %>%
+    footnote(
+      general = paste0("N = ", resultado$n_obs, " trading days.\\ ",
+                       "*** p<0.001  ** p<0.01  * p<0.05  † p<0.1."),
+      footnote_as_chunk = TRUE,
+      threeparttable = es_pdf,
+      escape = FALSE
+    )
+
+  print(tbl)
+}
+```
+
+# =============================================================================
+# PART F: EXPORT AND SUMMARY
+# =============================================================================
+
+```{r exportar_csv}
+write.csv(RESULTADOS_ALL, file.path(DIR_OUTPUT, "RESULTADOS_ALL_v4.csv"), row.names = FALSE)
+cat("CSV saved\n")
+```
+
+```{r guardar_helper_manuscrito}
+helper_v4 <- list(
+  RESULTADOS_ALL          = RESULTADOS_ALL,
+  fmt_celda               = fmt_celda,
+  nombre_var_display      = nombre_var_display,
+  construir_tabla_descomp = construir_tabla_descomp,
+  construir_tabla_algos   = construir_tabla_algos,
+  ALGO_PRINCIPAL          = ALGO_PRINCIPAL,
+  ALGO_LABELS             = ALGO_LABELS,
+  TICKERS                 = TICKERS,
+  MA_DIAS                 = MA_DIAS,
+  ALGORITMOS_TODOS        = ALGORITMOS_TODOS,
+  empresas_disponibles    = empresas_disponibles
+)
+saveRDS(helper_v4, file.path(DIR_OUTPUT, "helper_tablas_v4.rds"))
+cat("helper_tablas_v4.rds saved in", DIR_OUTPUT, "\n")
+```

@@ -1,0 +1,187 @@
+---
+title: "Extract & clean - Apple (AAPL)"
+author: "Yelko Bejarano"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(readr)
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(quantmod)
+
+TICKER <- "AAPL"
+KEYWORDS <- "\\b(AAPL|Apple|Tim Cook|iPhone|iPad|MacBook|Mac|iOS|Vision Pro)\\b"
+```
+
+# 1. Load and filter
+
+## 1.1. Check the ticker is in the news dataset
+
+```{r}
+unique_symbols <- unique(fread("../../nasdaq_exteral_data.csv", select = "Stock_symbol")$Stock_symbol)
+TICKER %in% unique_symbols
+```
+
+## 1.2. Load news for the ticker (FNSPID)
+
+```{r}
+news_data <- fread(
+  "../../nasdaq_exteral_data.csv",
+  select = c("Date", "Article_title", "Stock_symbol", "Lsa_summary")
+)
+news_data <- news_data[Stock_symbol == TICKER]
+news_data <- news_data[as.POSIXct(Date, tz = "UTC") >= as.POSIXct("2022-01-01", tz = "UTC")]
+
+cat("News for", TICKER, ":", nrow(news_data), "\n")
+```
+
+## 1.3. Load Reddit comments (2022-2023) and filter by company keywords
+
+```{r}
+comments_2022 <- read_csv(
+  "../../extraccion_reddit_v.1.1/wallstreetbets_Discussion_Threads_2022-01-01_to_2022-12-31_comments.csv",
+  col_select = c(comment_id, body, score, comment_datetime_full),
+  show_col_types = FALSE
+)
+comments_2023 <- read_csv(
+  "../../extraccion_reddit_v.1.1/wallstreetbets_Discussion_Threads_2023-01-01_to_2023-12-31_comments.csv",
+  col_select = c(comment_id, body, score, comment_datetime_full),
+  show_col_types = FALSE
+)
+
+comments_raw <- bind_rows(comments_2022, comments_2023) %>%
+  filter(grepl(KEYWORDS, body, ignore.case = TRUE, perl = TRUE))
+
+cat("Raw comments for", TICKER, ":", nrow(comments_raw), "\n")
+```
+
+# 2. Time adjustments and filters
+
+## 2.1. UTC -> EST
+
+```{r}
+comments_processed <- comments_raw %>%
+  mutate(
+    comment_datetime_est = with_tz(comment_datetime_full, tzone = "America/New_York"),
+    comment_date_est = as.Date(comment_datetime_est),
+    comment_hour = hour(comment_datetime_est),
+    weekday_original = wday(comment_date_est)
+  )
+
+cat("Comments before temporal filters:", nrow(comments_processed), "\n")
+```
+
+## 2.2. Drop weekend comments
+
+```{r}
+# Drop full Saturday + Sunday (EST); Friday after-hours is moved to Monday below
+comments_weekdays_only <- comments_processed %>%
+  filter(!(weekday_original == 7 | weekday_original == 1))
+
+cat("Weekend comments dropped:", nrow(comments_processed) - nrow(comments_weekdays_only), "\n")
+cat("Remaining:", nrow(comments_weekdays_only), "\n")
+```
+
+## 2.3. After-hours -> next trading day
+
+```{r}
+comments_clean <- comments_weekdays_only %>%
+  mutate(
+    # After-hours (>= 16:00) -> next trading day (Fri -> Mon; Mon-Thu -> next day)
+    trading_date = case_when(
+      weekday_original == 6 & comment_hour >= 16 ~ comment_date_est + 3,
+      weekday_original %in% 2:5 & comment_hour >= 16 ~ comment_date_est + 1,
+      TRUE ~ comment_date_est
+    )
+  ) %>%
+  select(-weekday_original)
+
+cat("After-hours comments reassigned:", sum(comments_clean$comment_hour >= 16), "\n")
+```
+
+# 3. Validation and statistics
+
+## 3.1. Weekend-removal validation
+
+```{r}
+weekday_distribution <- comments_clean %>%
+  mutate(wd = wday(as.Date(comment_datetime_est), label = TRUE)) %>%
+  count(wd) %>%
+  mutate(pct = n / sum(n) * 100)
+
+print(weekday_distribution)
+
+has_weekend <- any(weekday_distribution$wd %in% c("sáb", "dom", "Sat", "Sun"))
+if (has_weekend) {
+  stop("Validation failed: weekend comments detected")
+}
+cat("\nValidation OK: no weekend comments\n")
+```
+
+## 3.2. Final descriptive statistics
+
+```{r}
+cat("Date range:", as.character(range(comments_clean$trading_date)), "\n")
+cat("Total comments:", nrow(comments_clean), "\n")
+cat("Comments with score > 0:", sum(comments_clean$score > 0, na.rm = TRUE), "\n")
+cat("Comments with score < 0:", sum(comments_clean$score < 0, na.rm = TRUE), "\n")
+cat("Mean score:", round(mean(comments_clean$score, na.rm = TRUE), 2), "\n")
+```
+
+## 3.3. Temporal distribution plot
+
+```{r}
+comments_clean %>%
+  mutate(
+    weekday = wday(as.Date(comment_datetime_est), label = FALSE),
+    day = factor(weekday, levels = 2:6, labels = c("Mon", "Tue", "Wed", "Thu", "Fri"))
+  ) %>%
+  count(day) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = day, y = pct)) +
+  geom_col(fill = "#3498db", alpha = 0.8) +
+  geom_text(aes(label = paste0(round(pct, 1), "%")), vjust = -0.5, size = 4) +
+  labs(
+    title = paste("Temporal distribution - comments", TICKER),
+    subtitle = "Weekdays (Mon-Fri) | Sat-Sun removed | Fri after-hours -> Mon",
+    x = NULL,
+    y = "% comments"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+```
+
+# 4. Deduplicate
+
+```{r}
+cat("Before dedup:", nrow(comments_clean), "\n")
+
+comments_unique <- comments_clean %>%
+  distinct(body, score, trading_date, .keep_all = TRUE)
+
+cat("After dedup:", nrow(comments_unique), "\n")
+cat("Duplicates removed:", nrow(comments_clean) - nrow(comments_unique), "\n")
+```
+
+# 5. Export
+
+## 5.1. Write clean comments and news CSVs
+
+```{r}
+write_csv(comments_unique, paste0("comments_", tolower(TICKER), "_clean.csv"))
+write.csv(news_data, paste0("news_", TICKER, ".csv"), row.names = FALSE)
+
+cat("Exported: comments_", tolower(TICKER), "_clean.csv (", nrow(comments_unique), " rows)\n", sep = "")
+```
+
+## 5.2. Save prices and objects (RData)
+
+```{r}
+price <- getSymbols(TICKER, from = "2022-01-01", to = "2024-12-31", auto.assign = FALSE)
+save(news_data, price, comments_unique, file = paste0(tolower(TICKER), "_data.RData"))
+
+cat("Saved", paste0(tolower(TICKER), "_data.RData"), "\n")
+```

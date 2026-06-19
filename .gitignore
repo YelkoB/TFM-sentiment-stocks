@@ -1,0 +1,51 @@
+# --- Secrets / credenciales ---
+.env
+.env.local
+
+# --- Entornos / dependencias ---
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# --- R / RStudio ---
+.Rproj.user/
+.Rhistory
+.RData
+.RDataTmp
+*_data.RData
+*.rds
+
+# --- LaTeX / TinyTeX ---
+TinyTeX/
+*.log
+*.aux
+*.out
+*.synctex.gz
+
+# --- IDE / sistema ---
+.claude/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- Datos externos grandes (ver README.md para las fuentes) ---
+# FNSPID y precios no se versionan (varios GB)
+All_external.csv
+nasdaq_exteral_data.csv
+wsb_*.csv
+wallstreetbets_*.csv
+
+# --- Salidas generadas (se regeneran al ejecutar los analyze) ---
+RESULTADOS_*/
+**/RESULTADOS_*/
+_SENTIMENT_OUTPUTS/
+SENTIMENT_OUTPUTS/
+
+# --- Backups / intermedios ---
+*.bak.csv
+*_comparison.csv
+*_S3_context_aware.csv
+data_*_afterhours_final.csv
+*_tmp.R

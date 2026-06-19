@@ -1,0 +1,954 @@
+---
+title: "Multi-company news analysis: news-sentiment tables"
+author: "Yelko Bejarano"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{float}
+  - \usepackage{array}
+  - \usepackage{colortbl}
+  - \usepackage{xcolor}
+  - \usepackage{threeparttable}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12,
+  fig.height = 8
+)
+
+is_latex <- knitr::is_latex_output()
+```
+
+# =============================================================================
+# PART A: CONFIGURATION
+# =============================================================================
+
+```{r config_principal}
+# Methodological decisions (news, non-pooled; parallel to the comments analysis):
+#
+#   MANDATORY LAG: every news item -> NEXT trading day.
+#     Publication times are unreliable, so to avoid data leakage any news dated t
+#     affects t+1. For the same reason there is no AH/PM split for news (no M2).
+#
+#   MODELS:
+#     Model A: net shift (ΔS)          -> parallel to M1 of comments
+#     Model B: ΔS+ + ΔS- (pos/neg)     -> parallel to M3 of comments
+#
+#   STRATEGIES:
+#     S1 = title-only      (sentiment of the title only)
+#     S2 = smart-weighted  (title + summary, 30/70 weighting)
+
+TICKERS <- c("AAPL", "AMD", "AMZN", "DIS", "GOOGL", "META", "MSFT", "NVDA", "TSLA")
+# NFLX excluded: the master news dataset has no Netflix articles for 2022-2023.
+# META is kept but has no news in the period, so it is skipped by the file guard.
+
+ALGO_PRINCIPAL <- "roberta_stocks"
+ESTRATEGIAS    <- c("S1", "S2")   # both are estimated and reported
+
+ALGORITMOS_TODOS <- c(
+  "finbert", "roberta_social", "roberta_stocks",
+  "distilroberta_fin", "bert_sentiment"
+)
+
+MA_DIAS <- 7
+
+DIR_BASE   <- getwd()
+DIR_OUTPUT <- file.path(DIR_BASE, "RESULTADOS_NEWS_v1.0")
+if (!dir.exists(DIR_OUTPUT)) dir.create(DIR_OUTPUT, recursive = TRUE)
+
+ALGO_LABELS <- c(
+  "finbert"           = "FinBERT",
+  "roberta_social"    = "RoBERTa-Soc",
+  "roberta_stocks"    = "RoBERTa-Stk",
+  "distilroberta_fin" = "DistilRoB",
+  "bert_sentiment"    = "BERT"
+)
+
+ESTRAT_LABELS <- c(
+  "S1" = "Title-only",
+  "S2" = "Smart-weighted"
+)
+
+# Binary algorithms (positive/negative, no neutral) -> shift_pos and shift_neg
+# are linearly dependent (sum to 0): OLS drops one for collinearity.
+ALGORITMOS_BINARIOS <- c("roberta_stocks")
+
+cat("===================================================================\n")
+cat("                CONFIGURATION NEWS\n")
+cat(sprintf("  Companies:       %s\n", paste(TICKERS, collapse = ", ")))
+cat(sprintf("  Primary algo:    %s (%s)\n",
+            ALGO_PRINCIPAL, ALGO_LABELS[ALGO_PRINCIPAL]))
+cat(sprintf("  Strategies:      %s\n", paste(ESTRATEGIAS, collapse = ", ")))
+cat(sprintf("  MA control:      MA(%d)\n", MA_DIAS))
+cat("===================================================================\n")
+```
+
+```{r librerias}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(lubridate)
+  library(quantmod)
+  library(zoo)
+  library(sandwich)
+  library(lmtest)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+# =============================================================================
+# PART B: HELPER FUNCTIONS
+# =============================================================================
+
+```{r funciones_estimacion}
+# Estimate OLS with Newey-West HAC standard errors.
+# Variables dropped by collinearity are emitted with Coef = NA so tables show
+# "—" instead of an empty cell.
+estimar_modelo <- function(formula_str, data, nombre_modelo, ticker, algoritmo,
+                           estrategia) {
+  formula_str <- gsub("\\s+", " ", formula_str)
+  formula_modelo <- as.formula(formula_str)
+  vars_en_formula <- all.vars(formula_modelo)
+
+  vars_faltantes <- setdiff(vars_en_formula, names(data))
+  if (length(vars_faltantes) > 0) {
+    cat("      [!]", nombre_modelo, "-> MISSING VARS:",
+        paste(vars_faltantes, collapse = ", "), "\n")
+    return(NULL)
+  }
+
+  data_est <- data %>% select(all_of(vars_en_formula)) %>% na.omit()
+  if (nrow(data_est) < 30) {
+    cat("      [!]", nombre_modelo, "-> only", nrow(data_est), "obs (min 30)\n")
+    return(NULL)
+  }
+
+  modelo_ols  <- lm(formula_modelo, data = data_est)
+  robust_se   <- NeweyWest(modelo_ols, prewhite = FALSE, adjust = TRUE)
+  coef_robust <- coeftest(modelo_ols, vcov = robust_se)
+
+  n_obs    <- nrow(data_est)
+  k_params <- length(coef(modelo_ols))
+  r2_adj   <- summary(modelo_ols)$adj.r.squared
+  aic_val  <- AIC(modelo_ols)
+  aicc_val <- aic_val + (2 * k_params^2 + 2 * k_params) / (n_obs - k_params - 1)
+  bic_val  <- BIC(modelo_ols)
+
+  resultados <- data.frame()
+  for (i in 1:nrow(coef_robust)) {
+    var_name <- rownames(coef_robust)[i]
+    p_val    <- coef_robust[i, "Pr(>|t|)"]
+    sig_symbol <- ifelse(p_val < 0.001, "***",
+                  ifelse(p_val < 0.01,  "**",
+                  ifelse(p_val < 0.05,  "*",
+                  ifelse(p_val < 0.1,   "$\\dagger$", ""))))
+
+    resultados <- rbind(resultados, data.frame(
+      Modelo     = nombre_modelo,
+      Empresa    = ticker,
+      Algoritmo  = algoritmo,
+      Estrategia = estrategia,
+      N          = n_obs,
+      Variable   = var_name,
+      Coef       = coef_robust[i, "Estimate"],
+      Std_Error  = coef_robust[i, "Std. Error"],
+      t_value    = coef_robust[i, "t value"],
+      P_value    = p_val,
+      Signif     = sig_symbol,
+      AICc       = aicc_val,
+      BIC        = bic_val,
+      R2_adj     = r2_adj,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  # Variables dropped by collinearity: NA in coef(lm) and absent from
+  # coeftest(). Emitted with Coef = NA so get_celda shows "—".
+  coefs_lm <- coef(modelo_ols)
+  vars_descartadas <- names(coefs_lm)[is.na(coefs_lm)]
+  for (var_name in vars_descartadas) {
+    resultados <- rbind(resultados, data.frame(
+      Modelo     = nombre_modelo,
+      Empresa    = ticker,
+      Algoritmo  = algoritmo,
+      Estrategia = estrategia,
+      N          = n_obs,
+      Variable   = var_name,
+      Coef       = NA_real_,
+      Std_Error  = NA_real_,
+      t_value    = NA_real_,
+      P_value    = NA_real_,
+      Signif     = "",
+      AICc       = aicc_val,
+      BIC        = bic_val,
+      R2_adj     = r2_adj,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  return(resultados)
+}
+
+# Format a table cell = coefficient + stars. NA -> "—" (dropped by collinearity)
+fmt_celda <- function(coef, pval, digits = 4) {
+  if (is.na(coef)) return("—")
+  if (is.na(pval)) return(formatC(coef, format = "f", digits = digits))
+  stars <- ifelse(pval < 0.001, "***",
+           ifelse(pval < 0.01,  "**",
+           ifelse(pval < 0.05,  "*",
+           ifelse(pval < 0.1,   "$\\dagger$", ""))))
+  coef_str <- formatC(coef, format = "f", digits = digits)
+  paste0(coef_str, stars)
+}
+
+# Display name for a variable (without the algorithm or s1_/s2_ prefix)
+nombre_var_display <- function(var_raw, algoritmo = NULL) {
+  v <- var_raw
+  if (!is.null(algoritmo)) v <- gsub(paste0("^", algoritmo, "_"), "", v)
+  v <- gsub("^s[12]_", "", v)
+
+  if (knitr::is_latex_output()) {
+    lookup <- c(
+      "(Intercept)" = "Intercept",
+      "DJI_RET"     = "DJI RET",
+      "DJI_VOL"     = "DJI VOL",
+      "DJI_VOLUME"  = "DJI VOLUME",
+      "NWK"         = "NWK",
+      "ln_noticias" = "ln(news)",
+      "shift"       = "$\\Delta S$ news",
+      "shift_pos"   = "$\\Delta S^{+}$ news",
+      "shift_neg"   = "$\\Delta S^{-}$ news"
+    )
+  } else {
+    lookup <- c(
+      "(Intercept)" = "Intercept",
+      "DJI_RET"     = "DJI RET",
+      "DJI_VOL"     = "DJI VOL",
+      "DJI_VOLUME"  = "DJI VOLUME",
+      "NWK"         = "NWK",
+      "ln_noticias" = "ln(news)",
+      "shift"       = "$\\Delta$S news",
+      "shift_pos"   = "$\\Delta$S$^{+}$ news",
+      "shift_neg"   = "$\\Delta$S$^{-}$ news"
+    )
+  }
+
+  if (v %in% names(lookup)) return(lookup[v])
+  if (grepl("^VOL_MA",    v)) return(paste0("VOL MA(",  MA_DIAS, ")"))
+  if (grepl("^VOLUME_MA", v)) return(paste0("VOL. MA(", MA_DIAS, ")"))
+  return(v)
+}
+
+cat("Helper functions defined\n")
+```
+
+# =============================================================================
+# PART C: MAIN LOOP - PER-COMPANY PROCESSING (non-pooled)
+# =============================================================================
+
+```{r bucle_empresas, results='hide'}
+RESULTADOS_ALL <- data.frame()
+dji_df_global  <- NULL
+
+cat("===================================================================\n")
+cat("              NEWS PROCESSING (non-pooled)\n")
+cat("===================================================================\n\n")
+
+for (TICKER in TICKERS) {
+
+  cat("\n===", TICKER, "===\n")
+
+  # C.1 Load the S1 and S2 CSVs
+  file_s1 <- file.path(DIR_BASE, TICKER,
+    paste0("news_", tolower(TICKER), "_sentiments_S1_title_only.csv"))
+  file_s2 <- file.path(DIR_BASE, TICKER,
+    paste0("news_", tolower(TICKER), "_sentiments_S2_smart_weighted.csv"))
+
+  if (!file.exists(file_s1) || !file.exists(file_s2)) {
+    cat("  FILES NOT FOUND for", TICKER, "-> skipped\n")
+    next
+  }
+
+  news_s1 <- suppressWarnings(read_csv(file_s1, show_col_types = FALSE))
+  news_s2 <- suppressWarnings(read_csv(file_s2, show_col_types = FALSE))
+  cat("  S1:", nrow(news_s1), "news | S2:", nrow(news_s2), "news\n")
+
+  # C.2 MANDATORY LAG: every news item -> NEXT trading day
+  procesar_fecha_lag <- function(df) {
+    df %>%
+      mutate(
+        datetime_utc = ymd_hms(Date, tz = "UTC"),
+        datetime_est = with_tz(datetime_utc, tzone = "America/New_York"),
+        fecha_est    = as.Date(datetime_est),
+        next_day     = fecha_est + 1,
+        dow          = wday(next_day),
+        trading_day  = case_when(
+          dow == 7 ~ next_day + 2,   # Saturday -> Monday
+          dow == 1 ~ next_day + 1,   # Sunday -> Monday
+          TRUE     ~ next_day
+        )
+      ) %>%
+      select(-next_day, -dow)
+  }
+
+  news_s1 <- procesar_fecha_lag(news_s1)
+  news_s2 <- procesar_fecha_lag(news_s2)
+
+  # C.3 Market data
+  fecha_min <- min(c(news_s1$trading_day, news_s2$trading_day), na.rm = TRUE)
+  fecha_max <- max(c(news_s1$trading_day, news_s2$trading_day), na.rm = TRUE)
+
+  precio_accion <- tryCatch(
+    getSymbols(TICKER, from = fecha_min - 30, to = fecha_max + 1, auto.assign = FALSE),
+    error = function(e) { cat("  Error downloading", TICKER, "\n"); return(NULL) }
+  )
+  if (is.null(precio_accion)) next
+
+  precio_df <- data.frame(
+    date   = index(precio_accion),
+    high   = as.numeric(Hi(precio_accion)),
+    low    = as.numeric(Lo(precio_accion)),
+    close  = as.numeric(Cl(precio_accion)),
+    volume = as.numeric(Vo(precio_accion))
+  ) %>%
+    mutate(
+      RET    = log(close / lag(close)) * 100,
+      VOL    = (log(high) - log(low))^2 / (4 * log(2)) * 10000,
+      VOLUME = log(volume)
+    )
+
+  ma_var_vol    <- paste0("VOL_MA",    MA_DIAS)
+  ma_var_volume <- paste0("VOLUME_MA", MA_DIAS)
+
+  precio_df <- precio_df %>%
+    mutate(
+      !!ma_var_vol    := lag(zoo::rollmean(VOL,    k = MA_DIAS, fill = NA, align = "right")),
+      !!ma_var_volume := lag(zoo::rollmean(VOLUME, k = MA_DIAS, fill = NA, align = "right"))
+    )
+
+  cat("  Prices:", nrow(precio_df), "obs\n")
+
+  # DJI (downloaded once)
+  if (is.null(dji_df_global)) {
+    DJI_data <- getSymbols("^DJI", from = as.Date("2020-01-01"),
+                           to = Sys.Date(), auto.assign = FALSE)
+    dji_df_global <- data.frame(
+      date           = index(DJI_data),
+      DJI_close      = as.numeric(Cl(DJI_data)),
+      DJI_high       = as.numeric(Hi(DJI_data)),
+      DJI_low        = as.numeric(Lo(DJI_data)),
+      DJI_volume_raw = as.numeric(Vo(DJI_data))
+    ) %>%
+      mutate(
+        DJI_RET    = log(DJI_close / lag(DJI_close)) * 100,
+        DJI_VOL    = (log(DJI_high) - log(DJI_low))^2 / (4 * log(2)) * 10000,
+        DJI_VOLUME = log(DJI_volume_raw)
+      )
+    cat("  DJI loaded (global)\n")
+  }
+
+  # C.4 Loop over algorithms x strategies
+  cols_s1       <- names(news_s1)[grepl("^s1_.*_score$", names(news_s1))]
+  algos_en_csv  <- gsub("^s1_(.*)_score$", "\\1", cols_s1)
+  algos_validos <- intersect(ALGORITMOS_TODOS, algos_en_csv)
+  cat("  Algorithms:", paste(algos_validos, collapse = ", "), "\n")
+
+  # Same formula as the comments analysis: wt_sent_pos = (n_pos/n_total) * conf_mean_pos.
+  # This is robust to binary algorithms (no neutral), because conf_mean_pos and
+  # conf_mean_neg are means WITHIN each label subgroup and vary day to day,
+  # avoiding the perfect collinearity of weighted.mean(label==X, w=conf).
+  agregar_diario <- function(df, score_col, conf_col, label_col) {
+    df %>%
+      mutate(
+        score = suppressWarnings(as.numeric(.data[[score_col]])),
+        conf  = suppressWarnings(as.numeric(.data[[conf_col]])),
+        label = .data[[label_col]]
+      ) %>%
+      filter(!is.na(score), !is.na(conf), !is.na(trading_day)) %>%
+      group_by(trading_day) %>%
+      summarise(
+        sent_wt       = weighted.mean(score, w = conf, na.rm = TRUE),
+        n_total       = n(),
+        n_pos         = sum(label == "positive", na.rm = TRUE),
+        n_neg         = sum(label == "negative", na.rm = TRUE),
+        conf_mean_pos = mean(conf[label == "positive"], na.rm = TRUE),
+        conf_mean_neg = mean(conf[label == "negative"], na.rm = TRUE),
+        n_noticias    = n(),
+        .groups       = "drop"
+      ) %>%
+      mutate(
+        sent_pos = (n_pos / n_total) * replace_na(conf_mean_pos, 0),
+        sent_neg = -(n_neg / n_total) * replace_na(conf_mean_neg, 0)
+      ) %>%
+      arrange(trading_day) %>%
+      mutate(
+        shift     = sent_wt  - lag(sent_wt),
+        shift_pos = sent_pos - lag(sent_pos),
+        shift_neg = sent_neg - lag(sent_neg)
+      )
+  }
+
+  for (ALGORITMO in algos_validos) {
+
+    cat("    ->", ALGORITMO, "\n")
+
+    for (ESTRAT in ESTRATEGIAS) {
+
+      strat_low  <- tolower(ESTRAT)
+      strat_up   <- toupper(ESTRAT)
+      news_strat <- if (ESTRAT == "S2") news_s2 else news_s1
+
+      score_col <- paste0(strat_low, "_", ALGORITMO, "_score")
+      conf_col  <- paste0(strat_low, "_", ALGORITMO, "_confidence")
+      label_col <- paste0(strat_low, "_", ALGORITMO, "_label")
+
+      if (!all(c(score_col, conf_col, label_col) %in% names(news_strat))) {
+        cat("       ", ESTRAT, "missing cols\n"); next
+      }
+
+      daily <- agregar_diario(news_strat, score_col, conf_col, label_col) %>%
+        mutate(ln_noticias = log(replace_na(n_noticias, 0) + 1))
+
+      cols_precio <- c("date", "RET", "VOL", "VOLUME", ma_var_vol, ma_var_volume)
+
+      data_model <- daily %>%
+        inner_join(precio_df %>% select(all_of(cols_precio)),
+                   by = c("trading_day" = "date")) %>%
+        inner_join(dji_df_global %>% select(date, DJI_RET, DJI_VOL, DJI_VOLUME),
+                   by = c("trading_day" = "date")) %>%
+        arrange(trading_day) %>%
+        mutate(
+          NWK = if_else(row_number() == 1 | (trading_day - lag(trading_day)) > 1, 1, 0)
+        ) %>%
+        filter(!is.na(RET), !is.na(DJI_RET))
+
+      # Rename sentiment variables: <algo>_<sX>_<suffix>
+      for (v in c("shift", "shift_pos", "shift_neg")) {
+        if (v %in% names(data_model)) {
+          new_name <- paste0(ALGORITMO, "_", strat_low, "_", v)
+          names(data_model)[names(data_model) == v] <- new_name
+        }
+      }
+
+      ms <- function(v) paste0(ALGORITMO, "_", strat_low, "_", v)
+
+      ctrl_RET    <- "DJI_RET + NWK + ln_noticias"
+      ctrl_VOL    <- paste0("DJI_VOL + NWK + ln_noticias + ", ma_var_vol)
+      ctrl_VOLUME <- paste0("DJI_VOLUME + NWK + ln_noticias + ", ma_var_volume)
+
+      pref <- paste0("M", strat_up)  # MS1, MS2
+
+      MODELOS <- list()
+      MODELOS[[paste0(pref, "A_RET")]]    <- paste0("RET ~ ",    ctrl_RET,    " + ", ms("shift"))
+      MODELOS[[paste0(pref, "A_VOL")]]    <- paste0("VOL ~ ",    ctrl_VOL,    " + ", ms("shift"))
+      MODELOS[[paste0(pref, "A_VOLUME")]] <- paste0("VOLUME ~ ", ctrl_VOLUME, " + ", ms("shift"))
+      MODELOS[[paste0(pref, "B_RET")]]    <- paste0("RET ~ ",    ctrl_RET,    " + ", ms("shift_pos"), " + ", ms("shift_neg"))
+      MODELOS[[paste0(pref, "B_VOL")]]    <- paste0("VOL ~ ",    ctrl_VOL,    " + ", ms("shift_pos"), " + ", ms("shift_neg"))
+      MODELOS[[paste0(pref, "B_VOLUME")]] <- paste0("VOLUME ~ ", ctrl_VOLUME, " + ", ms("shift_pos"), " + ", ms("shift_neg"))
+
+      n_estimados <- 0
+      for (nombre_modelo in names(MODELOS)) {
+        res <- estimar_modelo(MODELOS[[nombre_modelo]], data_model,
+                              nombre_modelo, TICKER, ALGORITMO, ESTRAT)
+        if (!is.null(res)) {
+          RESULTADOS_ALL <- rbind(RESULTADOS_ALL, res)
+          n_estimados <- n_estimados + 1
+        }
+      }
+      cat("       ", ESTRAT, "ok (", n_estimados, "models)\n")
+    }
+  }
+}
+
+save(RESULTADOS_ALL, file = file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.RData"))
+write.csv(RESULTADOS_ALL, file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.csv"),
+          row.names = FALSE)
+cat("\nRData and CSV saved:", nrow(RESULTADOS_ALL), "rows\n")
+```
+
+```{r diagnostico_N, results='asis'}
+empresas_disponibles <- intersect(TICKERS, unique(RESULTADOS_ALL$Empresa))
+
+cat("Companies with results:", length(empresas_disponibles), "\n\n")
+
+resumen_N <- RESULTADOS_ALL %>%
+  filter(Algoritmo == ALGO_PRINCIPAL, Estrategia == "S2") %>%
+  group_by(Empresa, Modelo) %>%
+  summarise(N = first(N), .groups = "drop") %>%
+  pivot_wider(names_from = Modelo, values_from = N)
+
+if (nrow(resumen_N) > 0) {
+  print(kable(resumen_N, caption = paste0("N per company and model (",
+              ALGO_LABELS[ALGO_PRINCIPAL], ", S2 Smart-weighted)")))
+}
+```
+
+# =============================================================================
+# PART D: FIRST TABLES - DECOMPOSITION A vs B (S1 + S2 per company)
+# =============================================================================
+
+## Structure
+
+One table per company with four columns: **S1-A | S1-B | S2-A | S2-B**.
+
+- **Model A** (parallel to M1 of comments): net $\Delta S$.
+- **Model B** (parallel to M3): $\Delta S^{+}$ / $\Delta S^{-}$ decomposition.
+- **S1** = title-only; **S2** = smart-weighted.
+
+There is no M2 (AH/PM) equivalent because of the **mandatory lag**: news items are
+assigned to the next trading day without distinguishing a period, since their
+timestamps are unreliable.
+
+```{r cargar_rdata}
+# Uncomment to regenerate tables without re-estimating:
+# load(file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.RData"))
+# empresas_disponibles <- intersect(TICKERS, unique(RESULTADOS_ALL$Empresa))
+```
+
+```{r funcion_tabla_descomp}
+# Decomposition table S1+S2 x A/B for ONE company.
+#   Columns:   Variable | S1-A | S1-B | S2-A | S2-B
+#   pack_rows: RET / VOL / VOLUME -> Sentiment / Controls / Fit
+#   Cell:      coef + stars (NA -> "—" if dropped by collinearity)
+construir_tabla_descomp <- function(resultados, empresa, algoritmo) {
+
+  res <- resultados %>% filter(Empresa == empresa, Algoritmo == algoritmo)
+  if (nrow(res) == 0) return(NULL)
+
+  ma_vol_v    <- paste0("VOL_MA",    MA_DIAS)
+  ma_volume_v <- paste0("VOLUME_MA", MA_DIAS)
+
+  # Return the cell, matching by model + qualified variable name
+  # (with the algorithm_<sX>_ prefix) or unqualified (controls).
+  get_celda <- function(modelo, var_buscar) {
+    fila <- res %>% filter(Modelo == modelo, Variable == var_buscar)
+    if (nrow(fila) == 0) return("")
+    fmt_celda(fila$Coef[1], fila$P_value[1])
+  }
+
+  get_stat <- function(modelo, stat) {
+    sub <- res %>% filter(Modelo == modelo) %>% slice(1)
+    if (nrow(sub) == 0) return("")
+    switch(stat,
+      "AICc"   = formatC(sub$AICc,   format = "f", digits = 2),
+      "BIC"    = formatC(sub$BIC,    format = "f", digits = 2),
+      "R2_adj" = formatC(sub$R2_adj, format = "f", digits = 4)
+    )
+  }
+
+  # Model and qualified-variable names per strategy
+  qual_var <- function(strat_low, sufijo) paste0(algoritmo, "_", strat_low, "_", sufijo)
+
+  estrats <- list(
+    list(label = "S1", strat_low = "s1", pref = "MS1"),
+    list(label = "S2", strat_low = "s2", pref = "MS2")
+  )
+
+  dvs <- list(
+    list(nombre = "RET",
+         dv_suf = "RET",
+         ctrl   = c("(Intercept)", "DJI_RET", "NWK", "ln_noticias")),
+    list(nombre = "VOL",
+         dv_suf = "VOL",
+         ctrl   = c("(Intercept)", "DJI_VOL", "NWK", "ln_noticias", ma_vol_v)),
+    list(nombre = "VOLUME",
+         dv_suf = "VOLUME",
+         ctrl   = c("(Intercept)", "DJI_VOLUME", "NWK", "ln_noticias", ma_volume_v))
+  )
+
+  if (knitr::is_latex_output()) {
+    stats_disp <- c("AICc", "BIC", "$R^2$ adj")
+  } else {
+    stats_disp <- c("AICc", "BIC", "R² adj")
+  }
+  stats_keys <- c("AICc", "BIC", "R2_adj")
+
+  # Sentiment variables in row order (display names come from nombre_var_display())
+  sent_filas <- c("shift", "shift_pos", "shift_neg")
+  # ...and the column each row maps to (A or B)
+  col_de_sent <- c(shift = "A", shift_pos = "B", shift_neg = "B")
+
+  filas    <- list()
+  pack_vd  <- list()
+  pack_cat <- list()
+  row_idx  <- 0
+  n_obs    <- NA
+
+  for (dv in dvs) {
+    dv_start <- row_idx + 1
+
+    # Sentiment
+    cat_sent_start <- row_idx + 1
+    for (sf in sent_filas) {
+      v_display <- nombre_var_display(sf)
+      vals <- c(v_display)
+      for (e in estrats) {
+        m_a <- paste0(e$pref, "A_", dv$dv_suf)
+        m_b <- paste0(e$pref, "B_", dv$dv_suf)
+        var_q <- qual_var(e$strat_low, sf)
+        c_a <- if (col_de_sent[sf] == "A") get_celda(m_a, var_q) else ""
+        c_b <- if (col_de_sent[sf] == "B") get_celda(m_b, var_q) else ""
+        vals <- c(vals, c_a, c_b)
+      }
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- vals
+    }
+    pack_cat[[length(pack_cat) + 1]] <- list(
+      label = "Sentiment", start = cat_sent_start, end = row_idx)
+
+    # Controls
+    cat_ctrl_start <- row_idx + 1
+    for (v in dv$ctrl) {
+      v_display <- nombre_var_display(v)
+      vals <- c(v_display)
+      for (e in estrats) {
+        m_a <- paste0(e$pref, "A_", dv$dv_suf)
+        m_b <- paste0(e$pref, "B_", dv$dv_suf)
+        vals <- c(vals, get_celda(m_a, v), get_celda(m_b, v))
+      }
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- vals
+    }
+    pack_cat[[length(pack_cat) + 1]] <- list(
+      label = "Controls", start = cat_ctrl_start, end = row_idx)
+
+    # Fit
+    cat_adj_start <- row_idx + 1
+    for (i in seq_along(stats_disp)) {
+      vals <- c(stats_disp[i])
+      for (e in estrats) {
+        m_a <- paste0(e$pref, "A_", dv$dv_suf)
+        m_b <- paste0(e$pref, "B_", dv$dv_suf)
+        vals <- c(vals, get_stat(m_a, stats_keys[i]), get_stat(m_b, stats_keys[i]))
+      }
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- vals
+    }
+    pack_cat[[length(pack_cat) + 1]] <- list(
+      label = "Fit", start = cat_adj_start, end = row_idx)
+
+    if (is.na(n_obs)) {
+      sub_n <- res %>% filter(Modelo == paste0("MS2A_", dv$dv_suf)) %>% slice(1)
+      if (nrow(sub_n) == 0) sub_n <- res %>% filter(Modelo == paste0("MS1A_", dv$dv_suf)) %>% slice(1)
+      if (nrow(sub_n) > 0) n_obs <- sub_n$N
+    }
+
+    pack_vd[[length(pack_vd) + 1]] <- list(
+      label = dv$nombre, start = dv_start, end = row_idx)
+  }
+
+  tabla_df <- do.call(rbind, filas) %>% as.data.frame(stringsAsFactors = FALSE)
+  colnames(tabla_df) <- c("Variable", "S1_A", "S1_B", "S2_A", "S2_B")
+
+  list(tabla = tabla_df, pack_vd = pack_vd, pack_cat = pack_cat, n_obs = n_obs)
+}
+
+cat("Function construir_tabla_descomp defined\n")
+```
+
+```{r tablas_descomp, results='asis'}
+tabla_num <- 0
+fmt    <- if (knitr::is_latex_output()) "latex" else "html"
+es_pdf <- (fmt == "latex")
+
+es_binario <- ALGO_PRINCIPAL %in% ALGORITMOS_BINARIOS
+
+for (emp in empresas_disponibles) {
+
+  tabla_num <- tabla_num + 1
+  resultado <- construir_tabla_descomp(RESULTADOS_ALL, emp, ALGO_PRINCIPAL)
+
+  if (is.null(resultado)) {
+    cat(paste0("\n\n### Table ", tabla_num, ": ", emp, " - no data\n\n"))
+    next
+  }
+
+  tbl <- kbl(resultado$tabla,
+      format    = fmt,
+      caption   = paste0("A vs B decomposition of news sentiment -- ",
+                         emp, " (", ALGO_LABELS[ALGO_PRINCIPAL], ")"),
+      col.names = c("", "A", "B", "A", "B"),
+      align     = c("l", rep("c", 4)),
+      booktabs  = TRUE,
+      linesep   = "",
+      escape    = FALSE)
+
+  if (es_pdf) {
+    tbl <- tbl %>%
+      kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+  } else {
+    tbl <- tbl %>%
+      kable_classic(full_width = FALSE, html_font = "Cambria", font_size = 13) %>%
+      column_spec(1, width = "9em") %>%
+      column_spec(2, width = "8em", border_left = TRUE) %>%
+      column_spec(3, width = "8em", border_left = "1px solid #ddd") %>%
+      column_spec(4, width = "8em", border_left = TRUE) %>%
+      column_spec(5, width = "8em", border_left = "1px solid #ddd")
+  }
+
+  tbl <- tbl %>%
+    add_header_above(c(" " = 1,
+                       "S1 (title-only)"    = 2,
+                       "S2 (smart-weighted)" = 2),
+                     bold = TRUE, line = TRUE)
+
+  for (g in resultado$pack_vd) {
+    tbl <- tbl %>%
+      pack_rows(g$label, g$start, g$end,
+                bold = TRUE, italic = FALSE,
+                hline_before = TRUE, hline_after = FALSE,
+                latex_gap_space = "0.3em")
+  }
+
+  for (g in resultado$pack_cat) {
+    tbl <- tbl %>%
+      pack_rows(g$label, g$start, g$end,
+                bold = FALSE, italic = TRUE,
+                hline_before = FALSE, hline_after = FALSE,
+                indent = FALSE,
+                latex_gap_space = "0.1em")
+  }
+
+  tbl <- tbl %>%
+    footnote(
+      general = paste0("N = ", resultado$n_obs, " trading days.\\ ",
+                       "*** p<0.001  ** p<0.01  * p<0.05  $\\dagger$ p<0.1."),
+      footnote_as_chunk = TRUE,
+      threeparttable    = es_pdf,
+      escape            = FALSE
+    )
+
+  print(tbl)
+}
+
+n_tablas_descomp <- tabla_num
+```
+
+# =============================================================================
+# PART E: SECOND TABLES - ALGORITHM COMPARISON (one per company, S2)
+# =============================================================================
+
+```{r funcion_tabla_algos}
+# Algorithm-comparison table for ONE company.
+# Model B in strategy S2 only, sentiment variables only. Controls are estimated
+# but not reported.
+#   Columns:    Variable | FinBERT | RoBERTa-Soc | ... | BERT
+#   add_header: "Sentiment algorithm" over the columns
+#   pack_rows:  "RET", "VOL", "VOLUME"
+construir_tabla_algos <- function(resultados, empresa, algoritmos, algo_labels,
+                                  estrategia = "S2", modelo = "B") {
+
+  res <- resultados %>% filter(Empresa == empresa, Estrategia == estrategia)
+  if (nrow(res) == 0) return(NULL)
+
+  algos_ok <- intersect(algoritmos, unique(res$Algoritmo))
+  if (length(algos_ok) == 0) return(NULL)
+
+  strat_low <- tolower(estrategia)
+  pref      <- paste0("M", toupper(estrategia))
+
+  if (modelo == "A") {
+    vars_sent  <- c("shift")
+    modelo_suf <- "A"
+  } else {
+    vars_sent  <- c("shift_pos", "shift_neg")
+    modelo_suf <- "B"
+  }
+
+  dvs <- list(
+    list(nombre = "RET",    dv_suf = "RET"),
+    list(nombre = "VOL",    dv_suf = "VOL"),
+    list(nombre = "VOLUME", dv_suf = "VOLUME")
+  )
+
+  if (knitr::is_latex_output()) {
+    stats_disp <- c("AICc", "BIC", "$R^2$ adj")
+  } else {
+    stats_disp <- c("AICc", "BIC", "R² adj")
+  }
+  stats_keys <- c("AICc", "BIC", "R2_adj")
+
+  filas <- list()
+  pack_grupos <- list()
+  sent_boundary_rows <- c()
+  row_idx <- 0
+  n_obs <- NA
+
+  for (dv in dvs) {
+    dv_start   <- row_idx + 1
+    modelo_key <- paste0(pref, modelo_suf, "_", dv$dv_suf)
+
+    for (v in vars_sent) {
+      v_display <- nombre_var_display(v)
+      vals <- c(v_display)
+
+      for (algo in algos_ok) {
+        var_buscar <- paste0(algo, "_", strat_low, "_", v)
+        fila <- res %>% filter(Modelo == modelo_key, Algoritmo == algo,
+                               Variable == var_buscar)
+        if (nrow(fila) == 0) {
+          vals <- c(vals, "")
+        } else {
+          vals <- c(vals, fmt_celda(fila$Coef[1], fila$P_value[1]))
+        }
+      }
+
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- vals
+    }
+
+    sent_boundary_rows <- c(sent_boundary_rows, row_idx)
+
+    for (i in seq_along(stats_disp)) {
+      vals <- c(stats_disp[i])
+      for (algo in algos_ok) {
+        sub <- res %>% filter(Modelo == modelo_key, Algoritmo == algo) %>% slice(1)
+        if (nrow(sub) == 0) {
+          vals <- c(vals, "")
+        } else {
+          val <- switch(stats_keys[i],
+            "AICc"   = formatC(sub$AICc,   format = "f", digits = 2),
+            "BIC"    = formatC(sub$BIC,    format = "f", digits = 2),
+            "R2_adj" = formatC(sub$R2_adj, format = "f", digits = 4)
+          )
+          vals <- c(vals, val)
+        }
+      }
+      row_idx <- row_idx + 1
+      filas[[row_idx]] <- vals
+    }
+
+    if (is.na(n_obs)) {
+      sub_n <- res %>% filter(Modelo == modelo_key) %>% slice(1)
+      if (nrow(sub_n) > 0) n_obs <- sub_n$N
+    }
+
+    pack_grupos[[length(pack_grupos) + 1]] <- list(
+      label = dv$nombre, start = dv_start, end = row_idx)
+  }
+
+  tabla_df <- do.call(rbind, filas) %>% as.data.frame(stringsAsFactors = FALSE)
+  colnames(tabla_df) <- c("Variable", algo_labels[algos_ok])
+
+  list(tabla = tabla_df, pack_grupos = pack_grupos, algos_usados = algos_ok,
+       n_obs = n_obs, sent_boundary_rows = sent_boundary_rows)
+}
+
+cat("Function construir_tabla_algos defined\n")
+```
+
+```{r tablas_algos, results='asis'}
+for (emp in empresas_disponibles) {
+
+  tabla_num <- tabla_num + 1
+  resultado <- construir_tabla_algos(RESULTADOS_ALL, emp, ALGORITMOS_TODOS,
+                                     ALGO_LABELS, estrategia = "S2")
+
+  if (is.null(resultado)) {
+    cat(paste0("\n\n### Table ", tabla_num, ": ", emp, " - no data\n\n"))
+    next
+  }
+
+  n_algos <- length(resultado$algos_usados)
+
+  tbl <- kbl(resultado$tabla,
+      format    = fmt,
+      caption   = paste0("Algorithm comparison -- ", emp,
+                         " (Model B: $\\Delta$S$\\pm$ news, S2 Smart-weighted)"),
+      col.names = c("", colnames(resultado$tabla)[-1]),
+      align     = c("l", rep("c", n_algos)),
+      booktabs  = TRUE,
+      linesep   = "",
+      escape    = FALSE)
+
+  if (es_pdf) {
+    tbl <- tbl %>%
+      kable_styling(latex_options = c("HOLD_position", "scale_down"),
+                    font_size = 8)
+  } else {
+    tbl <- tbl %>%
+      kable_classic(full_width = FALSE, html_font = "Cambria", font_size = 13) %>%
+      column_spec(1, width = "7em") %>%
+      column_spec(2, border_left = TRUE)
+    if (n_algos > 1) {
+      for (col_i in 3:(n_algos + 1)) {
+        tbl <- tbl %>% column_spec(col_i, border_left = "1px solid #ddd")
+      }
+    }
+    for (br in resultado$sent_boundary_rows) {
+      tbl <- tbl %>% row_spec(br, extra_css = "border-bottom: 1px solid #ddd;")
+    }
+  }
+
+  tbl <- tbl %>%
+    add_header_above(c(" " = 1, "Sentiment algorithm" = n_algos),
+                     bold = TRUE, line = TRUE)
+
+  for (g in resultado$pack_grupos) {
+    tbl <- tbl %>%
+      pack_rows(g$label, g$start, g$end,
+                bold = TRUE, italic = FALSE,
+                hline_before = TRUE, hline_after = FALSE,
+                latex_gap_space = "0.3em")
+  }
+
+  tbl <- tbl %>%
+    footnote(
+      general = paste0("N = ", resultado$n_obs, " trading days.\\ ",
+                       "*** p<0.001  ** p<0.01  * p<0.05  $\\dagger$ p<0.1."),
+      footnote_as_chunk = TRUE,
+      threeparttable    = es_pdf,
+      escape            = FALSE
+    )
+
+  print(tbl)
+}
+```
+
+# =============================================================================
+# PART F: EXPORT
+# =============================================================================
+
+```{r exportar_csv}
+write.csv(RESULTADOS_ALL,
+          file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.csv"),
+          row.names = FALSE)
+cat("CSV saved at:", file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.csv"), "\n")
+```
+
+```{r guardar_helper_manuscrito}
+empresas_disponibles <- intersect(TICKERS, unique(RESULTADOS_ALL$Empresa))
+
+helper_news_v1 <- list(
+  RESULTADOS_ALL          = RESULTADOS_ALL,
+  fmt_celda               = fmt_celda,
+  nombre_var_display      = nombre_var_display,
+  construir_tabla_descomp = construir_tabla_descomp,
+  construir_tabla_algos   = construir_tabla_algos,
+  ALGO_PRINCIPAL          = ALGO_PRINCIPAL,
+  ALGO_LABELS             = ALGO_LABELS,
+  TICKERS                 = TICKERS,
+  MA_DIAS                 = MA_DIAS,
+  ALGORITMOS_TODOS        = ALGORITMOS_TODOS,
+  ESTRATEGIAS             = ESTRATEGIAS,
+  ESTRAT_LABELS           = ESTRAT_LABELS,
+  ALGORITMOS_BINARIOS     = ALGORITMOS_BINARIOS,
+  empresas_disponibles    = empresas_disponibles
+)
+saveRDS(helper_news_v1, file.path(DIR_OUTPUT, "helper_tablas_news_v1.rds"))
+cat("helper_tablas_news_v1.rds saved in", DIR_OUTPUT, "\n")
+```
