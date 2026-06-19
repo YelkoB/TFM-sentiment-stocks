@@ -41,8 +41,8 @@ wsb_*.csv
 wallstreetbets_*.csv
 
 # --- Salidas generadas (se regeneran al ejecutar los analyze) ---
-RESULTADOS_*/
-**/RESULTADOS_*/
+results/
+**/results/
 _SENTIMENT_OUTPUTS/
 SENTIMENT_OUTPUTS/
 

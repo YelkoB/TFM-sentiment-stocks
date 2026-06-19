@@ -117,7 +117,7 @@ cap_fig_ventanas <- paste0(
 ```
 
 ```{r fig-ventanas, fig.cap=cap_fig_ventanas, out.width="100%"}
-knitr::include_graphics("images/Grafico.png")
+knitr::include_graphics("images/temporal_windows.png")
 ```
 
 Debido a que el análisis lo orientamos a empresas de alta capitalización bursátil, el sentimiento asociado puede que sea persistente ya que inversores optimistas tienden a seguir siéndolo. Esto sugiere que donde puede encontrarse información valiosa es en el cambio, permitiendo poner el foco en cuán positivos o negativos han sido los nuevos comentarios frente a los anteriores \cite{AlNasseri2021}.
@@ -464,7 +464,7 @@ El volumen de negociación produce los resultados más consistentes del conjunto
 En conjunto, el volumen de negociación concentra la evidencia más robusta de todas las variables respuesta, donde la asimetría *premarket* —el reforzamiento de una convicción establecida, optimista o pesimista, asociado a menor volumen, y su erosión asociada a mayor volumen— se reproduce en prácticamente la totalidad de la muestra y se acompaña de mejoras sustanciales del AICc al pasar a *M3*. La volatilidad presenta un patrón *premarket* parcialmente análogo, aunque circunscrito a un subconjunto de empresas. La rentabilidad, en cambio, no muestra señales de sentimiento sistemáticas en ninguna especificación.
 
 ```{r resultados_setup, include=FALSE}
-h <- readRDS("COMPANIES/RESULTADOS_v4/helper_tablas_v4.rds")
+h <- readRDS("COMPANIES/results/helper_comments.rds")
 list2env(h, envir = .GlobalEnv)
 rm(h)
 ```
@@ -694,7 +694,7 @@ Para el volumen de negociación, el sentimiento de noticias resulta prácticamen
 En resumen, el sentimiento de noticias no presenta capacidad predictiva sistemática sobre ninguna de las tres variables dependientes ni bajo ninguna de las dos estrategias de construcción de la señal. Las variables de control —en particular el número de noticias y los índices DJI— absorben la práctica totalidad de la variación explicada. Además, el modelo con descomposición polar (*MB*, $\Delta S^+$ y $\Delta S^-$) no aporta mejoras de ajuste respecto al modelo de sentimiento neto (*MA*, $\Delta S$) en ninguna empresa ni variable, y la estrategia de ponderación adaptativa (*S2*) no presenta mejoras sustanciales frente a la de sólo título (*S1*).
 
 ```{r news_setup, include=FALSE}
-h_news <- readRDS("COMPANIES/RESULTADOS_NEWS_v1.0/helper_tablas_news_v1.rds")
+h_news <- readRDS("COMPANIES/results/helper_news.rds")
 list2env(h_news, envir = .GlobalEnv)
 rm(h_news)
 ```

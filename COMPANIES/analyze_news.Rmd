@@ -67,7 +67,7 @@ ALGORITMOS_TODOS <- c(
 MA_DIAS <- 7
 
 DIR_BASE   <- getwd()
-DIR_OUTPUT <- file.path(DIR_BASE, "RESULTADOS_NEWS_v1.0")
+DIR_OUTPUT <- file.path(DIR_BASE, "results")
 if (!dir.exists(DIR_OUTPUT)) dir.create(DIR_OUTPUT, recursive = TRUE)
 
 ALGO_LABELS <- c(
@@ -474,8 +474,8 @@ for (TICKER in TICKERS) {
   }
 }
 
-save(RESULTADOS_ALL, file = file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.RData"))
-write.csv(RESULTADOS_ALL, file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.csv"),
+save(RESULTADOS_ALL, file = file.path(DIR_OUTPUT, "news_results.RData"))
+write.csv(RESULTADOS_ALL, file.path(DIR_OUTPUT, "news_results.csv"),
           row.names = FALSE)
 cat("\nRData and CSV saved:", nrow(RESULTADOS_ALL), "rows\n")
 ```
@@ -515,7 +515,7 @@ timestamps are unreliable.
 
 ```{r cargar_rdata}
 # Uncomment to regenerate tables without re-estimating:
-# load(file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.RData"))
+# load(file.path(DIR_OUTPUT, "news_results.RData"))
 # empresas_disponibles <- intersect(TICKERS, unique(RESULTADOS_ALL$Empresa))
 ```
 
@@ -925,9 +925,9 @@ for (emp in empresas_disponibles) {
 
 ```{r exportar_csv}
 write.csv(RESULTADOS_ALL,
-          file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.csv"),
+          file.path(DIR_OUTPUT, "news_results.csv"),
           row.names = FALSE)
-cat("CSV saved at:", file.path(DIR_OUTPUT, "RESULTADOS_NEWS_v1.0.csv"), "\n")
+cat("CSV saved at:", file.path(DIR_OUTPUT, "news_results.csv"), "\n")
 ```
 
 ```{r guardar_helper_manuscrito}
@@ -949,6 +949,6 @@ helper_news_v1 <- list(
   ALGORITMOS_BINARIOS     = ALGORITMOS_BINARIOS,
   empresas_disponibles    = empresas_disponibles
 )
-saveRDS(helper_news_v1, file.path(DIR_OUTPUT, "helper_tablas_news_v1.rds"))
-cat("helper_tablas_news_v1.rds saved in", DIR_OUTPUT, "\n")
+saveRDS(helper_news_v1, file.path(DIR_OUTPUT, "helper_news.rds"))
+cat("helper_news.rds saved in", DIR_OUTPUT, "\n")
 ```

@@ -51,7 +51,7 @@ ALGORITMOS_TODOS <- c(
 MA_DIAS <- 7
 
 DIR_BASE <- getwd()
-DIR_OUTPUT <- file.path(DIR_BASE, "RESULTADOS_v4")
+DIR_OUTPUT <- file.path(DIR_BASE, "results")
 if (!dir.exists(DIR_OUTPUT)) dir.create(DIR_OUTPUT, recursive = TRUE)
 
 ALGO_LABELS <- c(
@@ -521,12 +521,12 @@ for (TICKER in TICKERS) {
 
   # Save per-company RData
   resultados_empresa <- RESULTADOS_ALL %>% filter(Empresa == TICKER)
-  rdata_file <- file.path(DIR_OUTPUT, paste0("resultados_", TICKER, ".RData"))
+  rdata_file <- file.path(DIR_OUTPUT, paste0(TICKER, "_results.RData"))
   save(resultados_empresa, file = rdata_file)
   cat("  RData:", basename(rdata_file), "\n")
 }
 
-save(RESULTADOS_ALL, file = file.path(DIR_OUTPUT, "RESULTADOS_ALL_v4.RData"))
+save(RESULTADOS_ALL, file = file.path(DIR_OUTPUT, "comments_results.RData"))
 cat("\nGlobal RData:", nrow(RESULTADOS_ALL), "rows\n")
 cat("  Companies:", paste(unique(RESULTADOS_ALL$Empresa), collapse = ", "), "\n")
 ```
@@ -611,7 +611,7 @@ One table per company. Variable column + 3 columns (M1, M2, M3).
 
 ```{r cargar_rdata}
 # Uncomment to regenerate tables without re-estimating:
-# load(file.path(DIR_OUTPUT, "RESULTADOS_ALL_v4.RData"))
+# load(file.path(DIR_OUTPUT, "comments_results.RData"))
 
 if (!exists("RESULTADOS_ALL") || nrow(RESULTADOS_ALL) == 0) {
   stop("No results. Run Part C or load the RData.")
@@ -994,7 +994,7 @@ for (emp in empresas_disponibles) {
 # =============================================================================
 
 ```{r exportar_csv}
-write.csv(RESULTADOS_ALL, file.path(DIR_OUTPUT, "RESULTADOS_ALL_v4.csv"), row.names = FALSE)
+write.csv(RESULTADOS_ALL, file.path(DIR_OUTPUT, "comments_results.csv"), row.names = FALSE)
 cat("CSV saved\n")
 ```
 
@@ -1012,6 +1012,6 @@ helper_v4 <- list(
   ALGORITMOS_TODOS        = ALGORITMOS_TODOS,
   empresas_disponibles    = empresas_disponibles
 )
-saveRDS(helper_v4, file.path(DIR_OUTPUT, "helper_tablas_v4.rds"))
-cat("helper_tablas_v4.rds saved in", DIR_OUTPUT, "\n")
+saveRDS(helper_v4, file.path(DIR_OUTPUT, "helper_comments.rds"))
+cat("helper_comments.rds saved in", DIR_OUTPUT, "\n")
 ```
