@@ -36,8 +36,6 @@ knitr::opts_chunk$set(
 )
 ```
 
-% \includepdf[pages=-]{Portada.pdf}  % cover page omitted from the public repo
-
 # 1. Introducción
 
 Con el auge de las redes sociales y su implicación en un sinfín de materias en las últimas dos décadas, los mercados financieros no han sido una excepción. Hace años que ha habido un incremento sustancial en la cantidad de texto financiero publicado por inversores minoristas en diversas plataformas como Reddit, StockTwits, X (antes Twitter) o Yahoo Finance \cite{Cookson2020,Bradley2024}; siendo el episodio con mayor impacto mediático el que sucedió con GameStop en enero de 2021, donde una comunidad del foro de Reddit (r/WallStreetBets) consiguió que mediante la interacción entre usuarios se diese un *short squeeze* histórico que provocó cambios drásticos en el mercado \cite{Pedersen2022,Mancini2022}. Este evento evidenció cómo las publicaciones de inversores minoristas dentro de una comunidad online pueden preceder a un impacto verdaderamente tangible en el mercado \cite{Anand2022} y, por ello, una cuestión que se puede plantear es si en todo el resto del océano de información publicada en diversos medios existe verdaderamente capacidad predictiva o si no es más que mero ruido \cite{Antweiler2004}.

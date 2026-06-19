@@ -17,12 +17,15 @@ __pycache__/
 *_data.RData
 *.rds
 
-# --- LaTeX / TinyTeX ---
+# --- LaTeX / TinyTeX / R Markdown intermediates ---
 TinyTeX/
 *.log
 *.aux
 *.out
 *.synctex.gz
+*.tex
+*_files/
+*_cache/
 
 # --- IDE / sistema ---
 .claude/
