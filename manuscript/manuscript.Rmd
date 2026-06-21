@@ -1,4 +1,7 @@
 ---
+title: "Análisis del sentimiento en redes y medios sociales y su capacidad predictiva en los mercados financieros: el efecto premarket"
+author: "Yelko Bejarano"
+date: "`r Sys.Date()`"
 output:
   pdf_document:
     fig_caption: true

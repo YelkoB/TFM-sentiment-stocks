@@ -1,4 +1,6 @@
-# TFM — Reddit & news sentiment for stock-movement prediction
+# Análisis del sentimiento en redes y medios sociales y su capacidad predictiva en los mercados financieros: el efecto premarket
+
+*Master's thesis (TFM) — Reddit & financial-news sentiment for stock-movement prediction.*
 
 Sentiment analysis of Reddit (r/WallStreetBets) comments and financial news (FNSPID)
 to study predictability of market movements for 10 S&P 500 companies
