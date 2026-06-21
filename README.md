@@ -1,6 +1,6 @@
-# Sentiment analysis in social networks and media and its predictive power in financial markets: the premarket effect
+# Sentiment analysis in social networks and its predictive power in financial markets: the premarket effect
 
-*Master's thesis (TFM). Original title (ES): «Análisis del sentimiento en redes y medios sociales y su capacidad predictiva en los mercados financieros: el efecto premarket».*
+*Master's thesis (TFM). Original title (ES): «Análisis del sentimiento en redes sociales y su capacidad predictiva en los mercados financieros: el efecto premarket».*
 
 Sentiment analysis of Reddit (r/WallStreetBets) comments and financial news (FNSPID)
 to study predictability of market movements for 10 S&P 500 companies
