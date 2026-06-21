@@ -25,7 +25,9 @@ header-includes:
   - \usepackage{xcolor}
   - \usepackage{pdfpages}
   - \newcommand{\real}[1]{#1}
-  - \renewcommand{\refname}{Referencias}
+  - \renewcommand{\refname}{7. Referencias}
+  - \renewcommand{\contentsname}{Índice}
+  - \renewcommand{\bibsection}{\phantomsection\addcontentsline{toc}{section}{\refname}\section*{\refname}}
 ---
 
 ```{r setup, include=FALSE}
@@ -38,6 +40,10 @@ knitr::opts_chunk$set(
   dev = "png", dpi = 300
 )
 ```
+
+\setcounter{tocdepth}{3}
+\tableofcontents
+\newpage
 
 # 1. Introducción
 
@@ -170,6 +176,8 @@ Donde $\Delta S_{p,t} = S_{p,t} - S_{p,t-1}$ es el cambio en el sentimiento pond
 El análisis paralelo sobre noticias financieras sigue la misma lógica predictiva, con una adaptación metodológica obligada: la base de datos FNSPID (*Financial News and Stock Price Integration Dataset*) no proporciona marcas temporales fiables para cada artículo, lo cual impide replicar la descomposición AH/PM y, con esto, asignar cada noticia a la ventana intradiaria correcta. Para preservar la orientación predictiva del marco —esto es, que la señal de sentimiento preceda siempre a la variable dependiente que pretende predecir— aplicamos un desfase de un día, donde toda noticia con fecha $t$ se asigna al día de *trading* $t+1$. Esta decisión elimina cualquier riesgo de *data leakage* y mantiene la comparabilidad con los comentarios, donde el sentimiento formado en la ventana *overnight* de $t$ también precede los movimientos del mercado en $t$.
 
 Como consecuencia, no existe un equivalente a *M2* para noticias; los modelos se reducen a dos especificaciones: *MA* —análogo a *M1*, con $\Delta S$ neto— y *MB* —análogo a *M3*, con $\Delta S^{+}$ y $\Delta S^{-}$—. Ambas las estimamos bajo dos estrategias alternativas de construcción de la señal de sentimiento a nivel de artículo. En la estrategia *S1* (*sólo título*), el clasificador se aplica únicamente al titular de cada noticia, generando una etiqueta de polaridad y una confianza que se agregan al nivel diario mediante la fórmula de sentimiento ponderado descrita anteriormente. En la estrategia *S2* (*ponderación adaptativa*), la construcción de la señal depende del contenido de cada artículo: si el titular menciona explícitamente la empresa analizada, se utiliza íntegramente el sentimiento del titular; si el titular no la menciona pero el resumen del artículo (*LSA Summary*, disponible en FNSPID) contiene al menos dos referencias a dicha empresa, se combina el sentimiento del titular (peso 30%) con el de las oraciones del resumen que mencionan la empresa (peso 70%); en caso contrario, se recurre también al titular. La lógica subyacente es que un titular que ya nombra a la empresa es suficientemente informativo por sí solo, mientras que cuando el titular es genérico el resumen puede aportar contexto relevante sobre el impacto específico de la noticia en la compañía. El vector de controles $\mathbf{x}_t$ es idéntico al de los comentarios, sustituyendo $\ln(\text{comments}_t)$ por $\ln(\text{noticias}_t)$.
+
+El código de extracción, procesamiento y análisis, junto con los datos intermedios necesarios para reproducir los resultados de este trabajo, está disponible públicamente en el repositorio del proyecto en GitHub.^[Disponible en <https://github.com/YelkoB/TFM-sentiment-stocks>.]
 
 # 3. Datos
 
