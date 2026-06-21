@@ -270,7 +270,7 @@ plot_dep("VOLUME", "log(TVL)")
 La *Tabla 2* resume las principales características del corpus de comentarios de WSB por empresa una vez aplicados los filtros metodológicos descritos anteriormente: conversión horaria a tiempo EST, eliminación de los registros correspondientes al fin de semana y descarte de los comentarios publicados en horario de mercado, que no contribuyen a ninguna de las ventanas informacionales del modelo. Se reporta el número total de observaciones válidas dentro de la ventana *overnight* ($N$), su reparto porcentual entre las subventanas *afterhours* (% AH) y *premarket* (% PM), y un resumen descriptivo de la señal de sentimiento diaria $S_{\text{ON},t}$ construida con el modelo de referencia (RoBERTa StockTwits): media, desviación típica, mínimo y máximo a lo largo del periodo muestral.
 
 ```{r tabla-comentarios}
-ruta_csv <- function(t) file.path("COMPANIES", t,
+ruta_csv <- function(t) file.path("..", "COMPANIES", t,
                                    paste0("comments_", tolower(t), "_all_sentiments.csv"))
 
 resumen <- map_dfr(TICKERS, function(t) {
@@ -344,7 +344,7 @@ La media de la señal de sentimiento es positiva en todas las empresas, lo que s
 ```{r tabla-noticias}
 ruta_news <- function(t, strat) {
   sufijo <- if (strat == "S1") "title_only" else "smart_weighted"
-  file.path("COMPANIES", t,
+  file.path("..", "COMPANIES", t,
             paste0("news_", tolower(t), "_sentiments_", strat, "_", sufijo, ".csv"))
 }
 
@@ -464,7 +464,7 @@ El volumen de negociación produce los resultados más consistentes del conjunto
 En conjunto, el volumen de negociación concentra la evidencia más robusta de todas las variables respuesta, donde la asimetría *premarket* —el reforzamiento de una convicción establecida, optimista o pesimista, asociado a menor volumen, y su erosión asociada a mayor volumen— se reproduce en prácticamente la totalidad de la muestra y se acompaña de mejoras sustanciales del AICc al pasar a *M3*. La volatilidad presenta un patrón *premarket* parcialmente análogo, aunque circunscrito a un subconjunto de empresas. La rentabilidad, en cambio, no muestra señales de sentimiento sistemáticas en ninguna especificación.
 
 ```{r resultados_setup, include=FALSE}
-h <- readRDS("COMPANIES/results/helper_comments.rds")
+h <- readRDS("../COMPANIES/results/helper_comments.rds")
 list2env(h, envir = .GlobalEnv)
 rm(h)
 ```
@@ -694,7 +694,7 @@ Para el volumen de negociación, el sentimiento de noticias resulta prácticamen
 En resumen, el sentimiento de noticias no presenta capacidad predictiva sistemática sobre ninguna de las tres variables dependientes ni bajo ninguna de las dos estrategias de construcción de la señal. Las variables de control —en particular el número de noticias y los índices DJI— absorben la práctica totalidad de la variación explicada. Además, el modelo con descomposición polar (*MB*, $\Delta S^+$ y $\Delta S^-$) no aporta mejoras de ajuste respecto al modelo de sentimiento neto (*MA*, $\Delta S$) en ninguna empresa ni variable, y la estrategia de ponderación adaptativa (*S2*) no presenta mejoras sustanciales frente a la de sólo título (*S1*).
 
 ```{r news_setup, include=FALSE}
-h_news <- readRDS("COMPANIES/results/helper_news.rds")
+h_news <- readRDS("../COMPANIES/results/helper_news.rds")
 list2env(h_news, envir = .GlobalEnv)
 rm(h_news)
 ```

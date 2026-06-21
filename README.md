@@ -10,15 +10,18 @@ FinBERT, RoBERTa Social, DistilRoBERTa Financial, BERT Sentiment).
 
 ```
 .
-├── manuscript.Rmd                    # full thesis: text, figures, result + descriptive tables
-├── references.bib                    # bibliography
-├── images/temporal_windows.png               # figure used by the manuscript
+├── manuscript/
+│   ├── manuscript.Rmd                # full thesis: text, figures, result + descriptive tables
+│   ├── manuscript.pdf                # rendered PDF
+│   ├── references.bib                # bibliography
+│   └── images/temporal_windows.png   # figure used by the manuscript
 ├── COMPANIES/
 │   ├── extract_reddit.py             # Reddit extraction (Arctic Shift + PRAW)
 │   ├── analyze_comments.Rmd          # comments analysis  -> results/
 │   ├── analyze_news.Rmd              # news analysis      -> results/
-│   ├── results/helper_comments.rds             # analyze output read by the manuscript
-│   ├── results/helper_news.rds
+│   ├── results/                      # analyze outputs (generated); these two are committed:
+│   │   ├── helper_comments.rds       #   written by analyze_comments.Rmd, read by the manuscript
+│   │   └── helper_news.rds           #   written by analyze_news.Rmd, read by the manuscript
 │   └── <TICKER>/                     # one folder per company
 │       ├── extract_<TICKER>.Rmd      # build clean comments + news from raw sources
 │       ├── sentiment_comments_<TICKER>.py
@@ -52,7 +55,7 @@ FinBERT, RoBERTa Social, DistilRoBERTa Financial, BERT Sentiment).
                 ▼                                ▼
       analyze_comments.Rmd              analyze_news.Rmd
                 ▼                                ▼
-   helper_comments.rds          helper_news.rds
+      helper_comments.rds               helper_news.rds
                 └───────────────┬───────────────┘
                                 ▼
                       manuscript.Rmd  →  PDF
@@ -75,7 +78,7 @@ those (committed) to render the final tables, figures and text.
 | `COMPANIES/<T>/sentiment_news_<T>.py` | Per-company news-sentiment (strategies S1 title-only / S2 smart-weighted); S2 weights by a company-specific term list |
 | `COMPANIES/analyze_comments.Rmd` | Final comments analysis over all companies (models M1/M2/M3: net overnight, AH+PM decomposition, pos/neg by window). OLS + Newey-West HAC. Pulls market data live via `quantmod` |
 | `COMPANIES/analyze_news.Rmd` | Final news analysis (Model A net shift / Model B pos-neg, strategies S1 & S2, mandatory 1-day lag). OLS + Newey-West HAC; market data live via `quantmod` |
-| `manuscript.Rmd` | Full thesis document. Reads `helper_*.rds` + the committed sentiment CSVs to render the final result tables, the descriptive tables (per-company comments/news) and the figures. Knits to PDF (needs LaTeX + `references.bib`) |
+| `manuscript/manuscript.Rmd` | Full thesis document. Reads the committed `helper_*.rds` (produced by `analyze_*.Rmd`) + the sentiment CSVs to render the result tables, the descriptive tables (per-company comments/news) and the figures. Knits to PDF (needs LaTeX) |
 
 ## External data (not versioned — too large)
 
@@ -99,7 +102,7 @@ runs from the committed CSVs without credentials.
 
 1. **From scratch** (needs the external data above): run `COMPANIES/<T>/extract_<T>.Rmd` per company.
 2. **From the committed CSVs**: the `*_all_sentiments.csv` and `news_*_sentiments_S1/S2.csv` are already in the repo, so you can knit `analyze_comments.Rmd` / `analyze_news.Rmd` directly **from the `COMPANIES/` directory** (they use `getwd()` as base, loop over all companies, and need internet for `quantmod`). To regenerate the sentiments from the clean CSVs instead, run `sentiment_comments_<T>.py` / `sentiment_news_<T>.py` first (each reads/writes inside its own company folder).
-3. **The manuscript**: `helper_comments.rds` and `helper_news.rds` are committed, so `manuscript.Rmd` knits straight to PDF (needs LaTeX + internet for the figures). Re-running the `analyze_*.Rmd` overwrites those `.rds` (note: since the analysis code is in English, regenerated tables would carry English labels).
+3. **The manuscript**: the two `helper_*.rds` it needs (output of `analyze_*.Rmd`) are committed under `COMPANIES/results/`, so `manuscript/manuscript.Rmd` knits straight to PDF **from the `manuscript/` folder** (needs LaTeX + internet for the figures). Re-running the `analyze_*.Rmd` overwrites those `.rds` (note: since the analysis code is in English, regenerated tables would carry English labels).
 
 ## Notes
 
